@@ -298,6 +298,23 @@ DSH 自己的端口是 loopback + cookie + 每进程随机 token，**不能**拿
 **两条路径的对应**：本机房间 = 直接 `postMessage` + `speaker.afterHumanMessage`（@ 谁就驱动谁）；
 镜像房间 = `lan.send({ authorBotId, silent })`，由宿主做同样两件事。工具的写路径只有这一处分叉。
 
+## 10. Agent 的工作目录
+
+一只 agent 只会说自己那一套「这个项目」的事，前提是它真的站在那个目录里。房间里的 agent
+过去都用会话默认目录（通常是启动目录），于是让它去对接一个具体项目时，它根本找不到。
+
+现在 `Bot` 带一个 `cwd`：
+
+- 建 agent（`bot.create` / `member.createBot`）时填，或在「我的 agent」表单里填；留空就是 `null`（用默认目录）。
+- 校验放在 `normalizeCwd()`：必须是**绝对路径**、必须存在、必须是目录。存一个不存在的目录，要到跑模型时才炸，
+  排查会绕很远，所以在入口就拒（`cwd_not_absolute` / `cwd_not_found` / `cwd_not_directory`）。
+- `turn.js` 建会话时用 `meta.cwd = bot.cwd || 默认目录`，所以这只 agent 之后的文件读写都在这个目录下。
+- **改目录会换一个新会话**：会话的 `cwd` 是创建时定下的，`resume` 出来的还是旧目录。所以 `bot.update`
+  发现 `cwd` 真的变了，就重置 `sessionId` —— 代价是这只 agent 在房间里的记忆从头开始，这是有意的：
+  换了工作区，旧会话的上下文本来也不该继续用。
+- 投影里带上 `cwd`（`project.bots`），界面才能回填编辑框。
+- 目录只决定**在哪干活**；能不能写文件仍归 DSH 的权限/审批那套管（本机三档：只读 / 授权后执行 / 完全授权）。
+
 **安全取舍**：局域网内明文 HTTP + 房间码，不做 TLS、不做账号。这是**设计取舍不是遗漏**：
 威胁模型是「同一 WiFi 下可信的人」，不是公网。peerId 是一次握手的随机凭据，
 除 `/lan/join`（需要房间码）与 `/lan/ping` 外，所有端点都要求它。

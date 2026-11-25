@@ -37,7 +37,7 @@
     "dsh": ">=0.2.1-rc.2 <0.3.0"
   },
   "scripts": {
-    "test": "node --test test/tool.test.mjs test/rooms.test.mjs test/state.test.mjs test/host.integration.test.mjs test/lan.test.mjs test/lan-multi.test.mjs test/lan-hardening.test.mjs test/lan-shapes.test.mjs test/lan-fuzz.test.mjs test/lan-ratelimit.test.mjs test/lan-port-busy.test.mjs test/lan-sessions.test.mjs test/lan-agents.test.mjs test/lan-restart.test.mjs test/auth-gate.test.mjs test/messages-page.test.mjs test/lan-addresses.test.mjs test/code-stamp.test.mjs test/palette.test.mjs test/protocol.test.mjs test/client.bundle.test.mjs test/client-notice.test.mjs test/manifest.test.mjs",
+    "test": "node --test test/agent-cwd.test.mjs test/tool.test.mjs test/rooms.test.mjs test/state.test.mjs test/host.integration.test.mjs test/lan.test.mjs test/lan-multi.test.mjs test/lan-hardening.test.mjs test/lan-shapes.test.mjs test/lan-fuzz.test.mjs test/lan-ratelimit.test.mjs test/lan-port-busy.test.mjs test/lan-sessions.test.mjs test/lan-agents.test.mjs test/lan-restart.test.mjs test/auth-gate.test.mjs test/messages-page.test.mjs test/lan-addresses.test.mjs test/code-stamp.test.mjs test/palette.test.mjs test/protocol.test.mjs test/client.bundle.test.mjs test/client-notice.test.mjs test/manifest.test.mjs",
     "preview:build": "node tools/preview/build.mjs",
     "preview:serve": "node tools/preview/server.mjs",
     "preview:notice": "node tools/preview/notice-check.mjs",

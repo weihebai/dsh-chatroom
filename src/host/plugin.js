@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
-import { join } from 'node:path'
+import { statSync } from 'node:fs'
+import { isAbsolute, join } from 'node:path'
 import { Store } from './state.js'
 import {
   addMember,
@@ -39,6 +40,30 @@ const MAX_BODY_BYTES = 9 * 1024 * 1024
 const PUBLIC_CODE = /^[a-z][a-z0-9_]{0,79}$/
 
 const log = (...args) => console.warn('[dsh-chatroom]', ...args)
+
+/**
+ * 把 agent 的工作目录规范化：留空 = null（用会话默认目录）。
+ * 不是绝对路径、目录不存在、或者不是目录，都在这里拒绝 —— 存一个不存在的目录，
+ * 到真正跑模型时才失败，排查会绕很远。
+ */
+function normalizeCwd(value) {
+  if (value === undefined) return undefined
+  const text = String(value ?? '').trim()
+  if (!text) return null
+  if (!isAbsolute(text)) {
+    throw Object.assign(new Error('工作目录要填绝对路径，比如 D:\\Projects\\my-app。'), { code: 'cwd_not_absolute' })
+  }
+  let stat
+  try {
+    stat = statSync(text)
+  } catch {
+    throw Object.assign(new Error('找不到这个目录：' + text), { code: 'cwd_not_found' })
+  }
+  if (!stat.isDirectory()) {
+    throw Object.assign(new Error('这不是一个目录：' + text), { code: 'cwd_not_directory' })
+  }
+  return text
+}
 
 function publicError(error, signal) {
   const code = typeof error?.code === 'string' && PUBLIC_CODE.test(error.code)
@@ -116,12 +141,13 @@ export async function dispatch({ store, speaker, gate = null, lan = null, comman
        * 所以面板上给一个「我的 agent」，建完就报给宿主（这台机器如果正在别人的屋里）。
        * 顺手能带房间：在本地房间里点新建，本来就期待它马上出现在屋里。
        */
+      const botCwd = normalizeCwd(input.cwd) ?? null
       const bot = {
         id: `bot_${randomUUID().replace(/-/g, '').slice(0, 12)}`,
         name: String(input.name ?? '').trim().slice(0, 60) || '新 agent',
         role: String(input.role ?? '').trim().slice(0, 200),
         sessionId: randomUUID(),
-        cwd: null,
+        cwd: botCwd,
         createdAt: new Date().toISOString(),
         lastError: null,
         lastSpokeAt: null,
@@ -151,13 +177,14 @@ export async function dispatch({ store, speaker, gate = null, lan = null, comman
     }
     case 'member.createBot': {
       assertLocal(roomOf(input.roomId), '加 agent')
+      const memberBotCwd = normalizeCwd(input.cwd) ?? null
       store.commit((draft) => {
         const bot = {
           id: `bot_${randomUUID().replace(/-/g, '').slice(0, 12)}`,
           name: String(input.name ?? '').trim().slice(0, 60) || '新 agent',
           role: String(input.role ?? '').trim().slice(0, 200),
           sessionId: randomUUID(),
-          cwd: null,
+          cwd: memberBotCwd,
           createdAt: new Date().toISOString(),
           lastError: null,
           lastSpokeAt: null,
@@ -359,11 +386,19 @@ export async function dispatch({ store, speaker, gate = null, lan = null, comman
       break
     }
     case 'bot.update': {
+      const nextCwd = normalizeCwd(input.cwd)
       store.commit((draft) => {
         const bot = draft.bots.find((row) => row.id === input.botId)
         if (!bot) throw Object.assign(new Error('bot_not_found'), { code: 'bot_not_found' })
         if (input.name !== undefined) bot.name = String(input.name).trim().slice(0, 60) || bot.name
         if (input.role !== undefined) bot.role = String(input.role).trim().slice(0, 200)
+        if (nextCwd !== undefined && nextCwd !== (bot.cwd ?? null)) {
+          bot.cwd = nextCwd
+          // 工作目录是会话创建时定下的；换目录就得换一个新会话，
+          // 否则 resume 回来的还是旧目录，模型照样找不到项目。
+          bot.sessionId = randomUUID()
+          bot.lastSpokeAt = null
+        }
         for (const room of draft.rooms) {
           if (room.remote) continue
           const member = room.members.find((row) => row.botId === bot.id)

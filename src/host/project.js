@@ -78,6 +78,7 @@ export function project(state, extra = {}) {
       id: bot.id,
       name: bot.name,
       role: bot.role,
+      cwd: bot.cwd ?? null,
       sessionId: bot.sessionId,
       lastError: bot.lastError ?? null,
       lastSpokeAt: bot.lastSpokeAt ?? null,
