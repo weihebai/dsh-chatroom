@@ -26,7 +26,7 @@ const TOOL_PARAMETERS = {
   properties: {
     action: {
       type: 'string',
-      enum: ['list', 'send', 'notify', 'read', 'leave', 'clear', 'session'],
+      enum: ['list', 'send', 'ask', 'notify', 'read', 'leave', 'clear', 'session'],
       description:
         'list 看房间与成员（标明本机 / LAN 加入）；send 以你本机创建好的某个 agent 身份发消息并 @ 人；notify 发一条不 @ 任何人的通知；read 读最近的对话；leave 把这个会话此前登记的成员身份从房间移除。',
     },
@@ -37,6 +37,7 @@ const TOOL_PARAMETERS = {
     text: { type: 'string', description: '消息正文。send / notify 必填。' },
     limit: { type: 'integer', description: 'read 返回多少条，默认 20，最多 200。' },
     mode: { type: 'string', enum: ['new', 'continue'], description: 'session 用：new 给这个 agent 开一个新会话（旧上下文不再带进来）；continue 回到上一个会话继续。' },
+    timeoutSec: { type: 'integer', description: 'ask 等回复的秒数，默认 90，最多 180。' },
   },
   required: ['action'],
 }
@@ -141,6 +142,41 @@ function bindSpeaker(store, member, sessionId) {
   })
 }
 
+/** ask 的超时：默认 90 秒，夹在 5..180。 */
+function askTimeout(value) {
+  const secs = Number(value)
+  const safe = Number.isFinite(secs) && secs > 0 ? secs : 90
+  return Math.min(180, Math.max(1, Math.round(safe))) * 1000
+}
+
+/**
+ * 等某个成员在房间里回一句话。
+ *
+ * 为什么轮询而不是挂监听：工具本身就在这一轮里，能用的只有 store 的当前状态；
+ * 目标 agent 的回复是另一个进程/会话异步补进来的，按 250ms 看一次最简单也最稳。
+ */
+async function waitForReply({ store, roomId, targetId, afterSeq, timeoutMs }) {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const room = store.state.rooms.find((row) => row.id === roomId)
+    if (!room) return null
+    const hit = room.messages.find((message) => message.seq > afterSeq && message.authorId === targetId)
+    if (hit) return hit
+    if (Date.now() > deadline) return null
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+}
+
+function replyMessage(target, reply, timeoutSec) {
+  if (!reply) {
+    const secs = Math.round(askTimeout(timeoutSec) / 1000)
+    return '「' + target.name + '」在 ' + secs + ' 秒内没有回复（可能它没被驱动、或那台机器没在跑）。消息已经发进房间了。'
+  }
+  if (reply.status === 'error') return '「' + target.name + '」这次没回上来：' + reply.text
+  if (reply.status === 'notice') return '「' + target.name + '」没有执行：' + reply.text
+  return '「' + target.name + '」回复：' + reply.text
+}
+
 function lanOf(runtime) {
   const lan = runtime.lan
   if (!lan || typeof lan.send !== 'function') {
@@ -171,6 +207,8 @@ export function createChatroomTool(runtime, { log = () => {} } = {}) {
     }
 
     const room = resolveRoom(state, input.room ?? input.roomId)
+    const body = clip(input.text, 8000).trim()
+    const names = Array.isArray(input.to) ? input.to.map((name) => clip(name, 60).trim()).filter(Boolean) : []
 
     if (action === 'leave') {
       const targets = []
@@ -236,6 +274,42 @@ export function createChatroomTool(runtime, { log = () => {} } = {}) {
       fail('bad_session_mode', 'session 的 mode 只能是 new 或 continue。')
     }
 
+    if (action === 'ask') {
+      if (!body) fail('message_empty', 'ask 需要 text。')
+      const targetName = names[0]
+      if (!targetName) fail('target_required', 'ask 需要 to：要先 @ 一个房间成员。')
+      const target = room.members.find((row) => row.name === targetName)
+      if (!target) fail('member_not_found', '这间屋里没有叫「' + targetName + '」的成员。')
+      // 不能问一个绑在自己身上的会话：那等于等自己，永远等不到。
+      const targetBot = target.botId ? store.state.bots.find((row) => row.id === target.botId) : null
+      if (targetBot && targetBot.sessionId === sessionId) {
+        fail('self_target', '「' + target.name + '」就是当前会话自己绑定的身份，不能 @ 自己等回复。')
+      }
+      const speaker = pickSpeaker(room, input.as)
+      if (target.id === speaker.id) fail('self_target', '你要 @ 的就是你自己的身份（' + speaker.name + '），换个成员再问。')
+      if (room.remote) {
+        const lan = lanOf(runtime)
+        await lan.announceAgents?.()
+        await lan.send({ roomId: room.id, text: withMentions(body, [target.name]), mentions: [target.name], authorBotId: speaker.botId })
+        const reply = await waitForReply({ store, roomId: room.id, targetId: target.id, afterSeq: room.nextSeq - 1, timeoutMs: askTimeout(input.timeoutSec) })
+        return { message: replyMessage(target, reply, input.timeoutSec) }
+      }
+      if (!runtime.speaker) fail('not_ready', '聊天室插件还没准备好，稍后再试。')
+      let posted = null
+      store.commit((draft) => {
+        posted = postMessage(draft, {
+          roomId: room.id,
+          authorId: speaker.id,
+          text: withMentions(body, [target.name]),
+          mentions: [target.id],
+          origin: { kind: 'local' },
+        })
+      })
+      runtime.speaker.afterHumanMessage({ roomId: room.id, messageId: posted.id })
+      const reply = await waitForReply({ store, roomId: room.id, targetId: target.id, afterSeq: posted.seq, timeoutMs: askTimeout(input.timeoutSec) })
+      return { message: replyMessage(target, reply, input.timeoutSec) }
+    }
+
     if (action === 'read') {
       const limit = Math.max(1, Math.min(200, Number(input.limit) || 20))
       const rows = room.messages
@@ -245,9 +319,6 @@ export function createChatroomTool(runtime, { log = () => {} } = {}) {
         .join('\n')
       return { message: rows ? '「' + room.name + '」最近的消息：\n' + rows : '「' + room.name + '」还没有人说话。' }
     }
-
-    const body = clip(input.text, 8000).trim()
-    const names = Array.isArray(input.to) ? input.to.map((name) => clip(name, 60).trim()).filter(Boolean) : []
 
     if (action === 'notify') {
       if (!body) fail('message_empty', 'notify 需要 text。')
@@ -310,7 +381,7 @@ export function createChatroomTool(runtime, { log = () => {} } = {}) {
   return {
     name: TOOL_NAME,
     description:
-      '在 DeepSeek Harness 的群聊房间里发言。**工具不新建成员**：只能用你在这间屋里已经创建好的某个 agent 身份发言，名字由 as 指定（只有一个本机 agent 时可省略），找不到就报错并列出可用的名字。send：以该身份发消息并 @ 指定成员，被 @ 的 agent 会在它自己的会话里开始干活，这条不等它回复；notify：发一条不 @ 任何人的通知，只给人看；read：读最近的对话；list：看房间与成员（标明本机 / LAN 加入）；leave：把这个会话此前登记的成员身份移除；clear：清空这间屋的聊天记录（成员和规则保留）；session：mode=new 给某个 agent 开新会话（旧上下文不带入），mode=continue 回到上一个会话。发送默认会把用到的成员绑定到当前会话（之后 @ 它会回到这里继续），bind:false 可只发不绑。',
+      '在 DeepSeek Harness 的群聊房间里发言。**工具不新建成员**：只能用你在这间屋里已经创建好的某个 agent 身份发言，名字由 as 指定（只有一个本机 agent 时可省略），找不到就报错并列出可用的名字。send：以该身份发消息并 @ 指定成员，被 @ 的 agent 会在它自己的会话里开始干活，这条不等它回复；ask：@ 一个成员并等它回一句，把回复直接返回给你（私聊式对话，默认等 90 秒）；notify：发一条不 @ 任何人的通知，只给人看；read：读最近的对话；list：看房间与成员（标明本机 / LAN 加入）；leave：把这个会话此前登记的成员身份移除；clear：清空这间屋的聊天记录（成员和规则保留）；session：mode=new 给某个 agent 开新会话（旧上下文不带入），mode=continue 回到上一个会话。发送默认会把用到的成员绑定到当前会话（之后 @ 它会回到这里继续），bind:false 可只发不绑。',
     parameters: TOOL_PARAMETERS,
     output: { schema: TOOL_OUTPUT_SCHEMA, render: (_args, value) => [{ type: 'text', text: value.message }] },
     execute,

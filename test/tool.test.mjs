@@ -278,6 +278,52 @@ test('发言调度：external 目录行也先等空闲再递话', async () => {
   assert.equal(store.state.rooms[0].messages.at(-1).authorId, member.id)
 })
 
+test('ask：@ 一个成员并拿回它的回复', async () => {
+  const store = fakeStore()
+  const room = createRoom(store.state, { name: '联调' })
+  addLocalAgent(store, room, 'backend-dev', 'bot_backend')
+  addLocalAgent(store, room, 'frontend-dev', 'bot_frontend')
+  const runtime = {
+    store,
+    lan: null,
+    speaker: {
+      afterHumanMessage({ roomId }) {
+        const live = store.state.rooms.find((row) => row.id === roomId)
+        const target = live.members.find((member) => member.name === 'frontend-dev')
+        store.commit(() => {
+          postMessage(store.state, { roomId, authorId: target.id, text: '收到，接口我接了。' })
+        })
+      },
+    },
+  }
+  const tool = createChatroomTool(runtime)
+  const result = await tool.execute(
+    { action: 'ask', room: '联调', as: 'backend-dev', to: ['frontend-dev'], text: '接口好了，你接一下', timeoutSec: 5 },
+    { agent: { id: 'sess-mine' } },
+  )
+  assert.match(result.message, /frontend-dev/)
+  assert.match(result.message, /收到，接口我接了/)
+})
+
+test('ask：没人回就按超时返回，且不能 @ 自己', async () => {
+  const store = fakeStore()
+  const room = createRoom(store.state, { name: '联调' })
+  addLocalAgent(store, room, 'backend-dev', 'bot_backend')
+  addLocalAgent(store, room, 'frontend-dev', 'bot_frontend')
+  const tool = createChatroomTool(runtimeWith(store, []))
+  await assert.rejects(
+    () => tool.execute({ action: 'ask', room: '联调', as: 'backend-dev', to: ['backend-dev'], text: '自问' }, { agent: { id: 'sess-mine' } }),
+    /就是你自己的身份/,
+  )
+  const started = Date.now()
+  const result = await tool.execute(
+    { action: 'ask', room: '联调', as: 'backend-dev', to: ['frontend-dev'], text: '在吗', timeoutSec: 1 },
+    { agent: { id: 'sess-mine' } },
+  )
+  assert.match(result.message, /秒内没有回复/)
+  assert.ok(Date.now() - started >= 900)
+})
+
 test('clear：清空聊天记录，成员和规则保留', async () => {
   const store = fakeStore()
   const room = createRoom(store.state, { name: '联调' })
