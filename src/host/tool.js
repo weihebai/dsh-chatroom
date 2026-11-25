@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { clearMessages, postMessage, removeMember } from './rooms.js'
+import { pageMessages } from './project.js'
 
 /**
  * 会话侧的聊天室工具：让正在跟你对话的这个 AI 能自己去群里喊人、报进度。
@@ -36,6 +37,7 @@ const TOOL_PARAMETERS = {
     to: { type: 'array', items: { type: 'string' }, description: '要 @ 的成员名字列表（send 用）。' },
     text: { type: 'string', description: '消息正文。send / notify 必填。' },
     limit: { type: 'integer', description: 'read 返回多少条，默认 20，最多 200。' },
+    beforeSeq: { type: 'integer', description: 'read 用：从这一条（不含）往前翻，取更早的一页。返回里会告诉你还有没有更早的。' },
     mode: { type: 'string', enum: ['new', 'continue'], description: 'session 用：new 给这个 agent 开一个新会话（旧上下文不再带进来）；continue 回到上一个会话继续。' },
     timeoutSec: { type: 'integer', description: 'ask 等回复的秒数，默认 90，最多 180。' },
   },
@@ -312,12 +314,21 @@ export function createChatroomTool(runtime, { log = () => {} } = {}) {
 
     if (action === 'read') {
       const limit = Math.max(1, Math.min(200, Number(input.limit) || 20))
-      const rows = room.messages
-        .filter((message) => message.status !== 'error' && message.status !== 'notice')
-        .slice(-limit)
-        .map((message) => '#' + message.seq + ' ' + message.authorName + '：' + message.text)
-        .join('\n')
-      return { message: rows ? '「' + room.name + '」最近的消息：\n' + rows : '「' + room.name + '」还没有人说话。' }
+      const beforeSeq = Number.isFinite(Number(input.beforeSeq)) ? Number(input.beforeSeq) : undefined
+      let page
+      if (room.remote) {
+        page = await lanOf(runtime).page({ roomId: room.id, beforeSeq, limit })
+      } else {
+        page = pageMessages(room, { beforeSeq, limit })
+      }
+      const rows = (page.messages ?? []).filter((m) => m.status !== 'error' && m.status !== 'notice')
+      if (!rows.length) return { message: '「' + room.name + '」这个位置没有更多消息了。' }
+      const total = typeof page.total === 'number' ? page.total : room.messages.length
+      const head =
+        '「' + room.name + '」消息 ' + rows[0].seq + '–' + rows[rows.length - 1].seq + '（共 ' + total + ' 条）' +
+        (page.hasMore ? '，还有更早的：read 时带上 beforeSeq=' + rows[0].seq : '，已经到头了')
+      const bodyText = rows.map((m) => '#' + m.seq + ' ' + m.authorName + '：' + m.text).join('\n')
+      return { message: head + '\n' + bodyText }
     }
 
     if (action === 'notify') {
@@ -381,7 +392,7 @@ export function createChatroomTool(runtime, { log = () => {} } = {}) {
   return {
     name: TOOL_NAME,
     description:
-      '在 DeepSeek Harness 的群聊房间里发言。**工具不新建成员**：只能用你在这间屋里已经创建好的某个 agent 身份发言，名字由 as 指定（只有一个本机 agent 时可省略），找不到就报错并列出可用的名字。send：以该身份发消息并 @ 指定成员，被 @ 的 agent 会在它自己的会话里开始干活，这条不等它回复；ask：@ 一个成员并等它回一句，把回复直接返回给你（私聊式对话，默认等 90 秒）；notify：发一条不 @ 任何人的通知，只给人看；read：读最近的对话；list：看房间与成员（标明本机 / LAN 加入）；leave：把这个会话此前登记的成员身份移除；clear：清空这间屋的聊天记录（成员和规则保留）；session：mode=new 给某个 agent 开新会话（旧上下文不带入），mode=continue 回到上一个会话。发送默认会把用到的成员绑定到当前会话（之后 @ 它会回到这里继续），bind:false 可只发不绑。',
+      '在 DeepSeek Harness 的群聊房间里发言。**工具不新建成员**：只能用你在这间屋里已经创建好的某个 agent 身份发言，名字由 as 指定（只有一个本机 agent 时可省略），找不到就报错并列出可用的名字。send：以该身份发消息并 @ 指定成员，被 @ 的 agent 会在它自己的会话里开始干活，这条不等它回复；ask：@ 一个成员并等它回一句，把回复直接返回给你（私聊式对话，默认等 90 秒）；notify：发一条不 @ 任何人的通知，只给人看；read：读最近的对话，带 beforeSeq 可以往前翻页；list：看房间与成员（标明本机 / LAN 加入）；leave：把这个会话此前登记的成员身份移除；clear：清空这间屋的聊天记录（成员和规则保留）；session：mode=new 给某个 agent 开新会话（旧上下文不带入），mode=continue 回到上一个会话。发送默认会把用到的成员绑定到当前会话（之后 @ 它会回到这里继续），bind:false 可只发不绑。',
     parameters: TOOL_PARAMETERS,
     output: { schema: TOOL_OUTPUT_SCHEMA, render: (_args, value) => [{ type: 'text', text: value.message }] },
     execute,

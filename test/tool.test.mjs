@@ -324,6 +324,23 @@ test('ask：没人回就按超时返回，且不能 @ 自己', async () => {
   assert.ok(Date.now() - started >= 900)
 })
 
+test('read：分页读取历史', async () => {
+  const store = fakeStore()
+  const room = createRoom(store.state, { name: '联调' })
+  addLocalAgent(store, room, 'backend-dev', 'bot_backend')
+  for (let i = 1; i <= 5; i += 1) {
+    store.commit(() => {
+      postMessage(store.state, { roomId: room.id, authorId: store.state.self.id, text: '第' + i + '条' })
+    })
+  }
+  const tool = createChatroomTool(runtimeWith(store, []))
+  const page1 = await tool.execute({ action: 'read', room: '联调', limit: 2 }, { agent: { id: 'sess-mine' } })
+  assert.match(page1.message, /消息 4–5/)
+  assert.match(page1.message, /beforeSeq=4/)
+  const page2 = await tool.execute({ action: 'read', room: '联调', limit: 2, beforeSeq: 4 }, { agent: { id: 'sess-mine' } })
+  assert.match(page2.message, /消息 2–3/)
+})
+
 test('clear：清空聊天记录，成员和规则保留', async () => {
   const store = fakeStore()
   const room = createRoom(store.state, { name: '联调' })
