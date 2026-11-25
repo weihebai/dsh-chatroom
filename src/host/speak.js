@@ -85,7 +85,7 @@ function buildPrompt({ room, bot, at }) {
       : at === 'round'
         ? '现在轮到你发言：就上面的话题说你自己的看法，可以顺着别人的话补充或反驳。'
         : '现在轮到你了：回应上面提到你或与你有关的内容。',
-    `要求：中文；不超过 ${room.rules.maxChars} 字；只输出你要说的那段话本身，不要前缀、不要解释、不要「作为 X」这类元信息。`,
+    `要求：中文；不超过 ${room.rules.maxChars} 字；只从你的职责出发说你该说的那部分，不要替别的成员下结论；只输出你要说的那段话本身，不要前缀、不要解释、不要「作为 X」这类元信息。`,
   ]
     .filter((line) => line !== '')
     .join('\n')
@@ -106,7 +106,8 @@ export function createSpeaker({ store, runner, dispatchRemote = null, gate = nul
    * 没有这道闸，两个 agent 可以互相「收到」「好的」一直转下去，每一圈都是一次真实模型调用。
    */
   const autoRounds = new Map()
-  const MAX_AUTO_ROUNDS = 2
+  /** roomId → 已经为这一串自动讨论发过「请房主拍板」的提醒（人一说话就清）。 */
+  const escalated = new Set()
 
   /**
    * 这一轮是谁的话引出来的。
@@ -370,16 +371,49 @@ export function createSpeaker({ store, runner, dispatchRemote = null, gate = nul
    * 一条人消息进来后，按当前规则决定谁说话。
    * 不 await：房间面板先看到人那条，agent 的回复随 watch 一帧一帧出现。
    */
+  /**
+   * 自动讨论到顶还没结论：在屋里 @ 房主（人）请拍板，然后停手。
+   *
+   * 为什么要留这一条而不是静默停住：两个 agent 各说各的、谁也不服谁的时候，
+   * 屋里看起来「还在聊」，实际在原地转圈。人不主动看就永远不知道它卡住了。
+   * 一条明确点名房主的消息，既把人叫来，也给这段讨论一个结束点。
+   */
+  function escalate(roomId, message, limit) {
+    const room = roomOrFail(roomId)
+    const owner =
+      room.members.find((member) => member.id === room.ownerId) ??
+      room.members.find((member) => member.kind === 'human') ??
+      null
+    const who = owner ? '@' + owner.name : '@房主'
+    const text =
+      '（自动讨论已经进行 ' + limit + ' 轮，仍未达成一致，先停在这里）' +
+      who + ' 请你拍板：继续让他们聊，还是按哪个方案走。'
+    store.commit((draft) => {
+      const row = getRoom(draft, roomId)
+      if (!row) return
+      const author = row.members.find((member) => member.id === message.authorId) ? message.authorId : row.ownerId
+      postMessage(draft, { roomId, authorId: author, text })
+    })
+    log('auto_round_escalated', { roomId, limit })
+  }
+
   function afterHumanMessage({ roomId, messageId }) {
     const room = roomOrFail(roomId)
     const message = room.messages.find((row) => row.id === messageId)
-    // 人说话清零自动回合计数；agent 说话才累加，到顶就不再自动开新一轮。
+    // 人说话清零自动回合计数；agent 说话才累加，到顶就 @ 房主拍板并停手。
     if (!message || message.authorKind === 'human') {
       autoRounds.delete(roomId)
+      escalated.delete(roomId)
     } else {
+      const limit = Math.max(1, Math.min(10, Number(room.rules.maxAutoRounds) || 3))
       const count = autoRounds.get(roomId) ?? 0
-      if (count >= MAX_AUTO_ROUNDS) {
-        log('auto_round_capped', { roomId, count })
+      if (count >= limit) {
+        if (!escalated.has(roomId)) {
+          escalated.add(roomId)
+          escalate(roomId, message, limit)
+        } else {
+          log('auto_round_capped', { roomId, count })
+        }
         return
       }
       autoRounds.set(roomId, count + 1)

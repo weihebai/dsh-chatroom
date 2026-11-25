@@ -16,6 +16,7 @@ export const DEFAULT_RULES = {
   maxSpeakers: 3, // 一条人消息最多引出几个 agent 回复（含接力）
   maxDepth: 2, // agent 之间接力的最大层数
   maxChars: 1200, // 单条消息上限
+  maxAutoRounds: 3, // agent 之间自动讨论最多几轮，到顶就 @ 房主拍板
 }
 
 const LIMITS = { name: 60, topic: 400, role: 200, text: 8000, members: 60, messages: 4000 }
@@ -116,6 +117,9 @@ export function updateRoom(state, { roomId, name, topic, rules } = {}) {
     if (rules.maxSpeakers !== undefined) room.rules.maxSpeakers = clampInt(rules.maxSpeakers, 1, 8, room.rules.maxSpeakers)
     if (rules.maxDepth !== undefined) room.rules.maxDepth = clampInt(rules.maxDepth, 0, 3, room.rules.maxDepth)
     if (rules.maxChars !== undefined) room.rules.maxChars = clampInt(rules.maxChars, 120, 4000, room.rules.maxChars)
+    if (rules.maxAutoRounds !== undefined) {
+      room.rules.maxAutoRounds = clampInt(rules.maxAutoRounds, 1, 10, room.rules.maxAutoRounds)
+    }
   }
   return room
 }
