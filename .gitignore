@@ -1,6 +1,9 @@
 node_modules/
 tools/preview/public/
 *.log
+
+# 本机 DSH 安装路径配置（含本机绝对路径，不入仓；模板见 dsh-restart.local.example.ps1）
+dsh-restart.local.ps1
 .DS_Store
 *.tgz
 .tmp-*
