@@ -305,6 +305,22 @@ test('ask：@ 一个成员并拿回它的回复', async () => {
   assert.match(result.message, /收到，接口我接了/)
 })
 
+test('ask 默认不等：发完立即返回', async () => {
+  const store = fakeStore()
+  const room = createRoom(store.state, { name: '联调' })
+  addLocalAgent(store, room, 'backend-dev', 'bot_backend')
+  addLocalAgent(store, room, 'frontend-dev', 'bot_frontend')
+  const tool = createChatroomTool(runtimeWith(store, []))
+  const started = Date.now()
+  const result = await tool.execute(
+    { action: 'ask', room: '联调', as: 'backend-dev', to: ['frontend-dev'], text: '在吗' },
+    { agent: { id: 'sess-mine' } },
+  )
+  assert.match(result.message, /不等回复/)
+  assert.ok(Date.now() - started < 500)
+  assert.equal(store.state.rooms[0].messages.at(-1).authorName, 'backend-dev')
+})
+
 test('ask：没人回就按超时返回，且不能 @ 自己', async () => {
   const store = fakeStore()
   const room = createRoom(store.state, { name: '联调' })

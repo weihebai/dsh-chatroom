@@ -39,7 +39,7 @@ const TOOL_PARAMETERS = {
     limit: { type: 'integer', description: 'read 返回多少条，默认 20，最多 200。' },
     beforeSeq: { type: 'integer', description: 'read 用：从这一条（不含）往前翻，取更早的一页。返回里会告诉你还有没有更早的。' },
     mode: { type: 'string', enum: ['new', 'continue'], description: 'session 用：new 给这个 agent 开一个新会话（旧上下文不再带进来）；continue 回到上一个会话继续。' },
-    timeoutSec: { type: 'integer', description: 'ask 等回复的秒数，默认 90，最多 180。' },
+    timeoutSec: { type: 'integer', description: 'ask 用：可选。给了就等它回这么久（1..180 秒）；不给就发完立即返回、不等（整轮可能要几分钟，用 read 查结果更稳）。' },
   },
   required: ['action'],
 }
@@ -289,11 +289,14 @@ export function createChatroomTool(runtime, { log = () => {} } = {}) {
       }
       const speaker = pickSpeaker(room, input.as)
       if (target.id === speaker.id) fail('self_target', '你要 @ 的就是你自己的身份（' + speaker.name + '），换个成员再问。')
+      // 不给 timeoutSec 就发完即回（整轮可能要几分钟，别把会话卡死）。
+      const waitMs = input.timeoutSec === undefined ? 0 : askTimeout(input.timeoutSec)
       if (room.remote) {
         const lan = lanOf(runtime)
         await lan.announceAgents?.()
         await lan.send({ roomId: room.id, text: withMentions(body, [target.name]), mentions: [target.name], authorBotId: speaker.botId })
-        const reply = await waitForReply({ store, roomId: room.id, targetId: target.id, afterSeq: room.nextSeq - 1, timeoutMs: askTimeout(input.timeoutSec) })
+        if (!waitMs) return { message: '已把消息发给「' + target.name + '」（@ 了它）。这条不等回复；要看结果就让我 read 一下房间，或加 timeoutSec 让我等。' }
+        const reply = await waitForReply({ store, roomId: room.id, targetId: target.id, afterSeq: room.nextSeq - 1, timeoutMs: waitMs })
         return { message: replyMessage(target, reply, input.timeoutSec) }
       }
       if (!runtime.speaker) fail('not_ready', '聊天室插件还没准备好，稍后再试。')
@@ -308,7 +311,8 @@ export function createChatroomTool(runtime, { log = () => {} } = {}) {
         })
       })
       runtime.speaker.afterHumanMessage({ roomId: room.id, messageId: posted.id })
-      const reply = await waitForReply({ store, roomId: room.id, targetId: target.id, afterSeq: posted.seq, timeoutMs: askTimeout(input.timeoutSec) })
+      if (!waitMs) return { message: '已把消息发给「' + target.name + '」（@ 了它）。这条不等回复；要看结果就让我 read 一下房间，或加 timeoutSec 让我等。' }
+      const reply = await waitForReply({ store, roomId: room.id, targetId: target.id, afterSeq: posted.seq, timeoutMs: waitMs })
       return { message: replyMessage(target, reply, input.timeoutSec) }
     }
 

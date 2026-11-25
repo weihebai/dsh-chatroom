@@ -109,6 +109,42 @@ export function createSpeaker({ store, runner, dispatchRemote = null, gate = nul
   /** roomId → 已经为这一串自动讨论发过「请房主拍板」的提醒（人一说话就清）。 */
   const escalated = new Set()
 
+  /** sessionId → 正在生成的草稿。只在内存，不落库、不进历史；跑完由正式消息取代。 */
+  const streams = new Map()
+
+  function beginStream(sessionId, name, roomId) {
+    if (!sessionId) return
+    streams.set(sessionId, { roomId, name: name || '', text: '', at: 0 })
+  }
+
+  function endStream(sessionId) {
+    const live = streams.get(sessionId)
+    if (!live) return
+    streams.delete(sessionId)
+    store.commit((state) => {
+      const room = getRoom(state, live.roomId)
+      if (!room || !room.activity) return
+      const next = { ...room.activity }
+      delete next.streaming
+      room.activity = Object.keys(next).length ? next : null
+    })
+  }
+
+  /** 收一个 text-delta：攒着，最多 250ms 往房间推一次，别把长轮询刷爆。 */
+  function pushStream(sessionId, text) {
+    const live = streams.get(sessionId)
+    if (!live || !text) return
+    live.text = (live.text + text).slice(-2000)
+    const now = Date.now()
+    if (now - live.at < 250) return
+    live.at = now
+    store.commit((state) => {
+      const room = getRoom(state, live.roomId)
+      if (!room) return
+      room.activity = { ...(room.activity ?? {}), streaming: { name: live.name, text: live.text } }
+    })
+  }
+
   /**
    * 这一轮是谁的话引出来的。
    *
@@ -183,9 +219,13 @@ export function createSpeaker({ store, runner, dispatchRemote = null, gate = nul
       log('bot_missing', botId)
       return
     }
+    // 本机驱动时才需要盯它的增量（远程 agent 的增量在对面机器上，拿不到）。
+    const speakerBot = external ? (directoryBot?.external === true ? directoryBot : bot) : directoryBot
+    const driveSession = !remote && speakerBot ? speakerBot.sessionId : null
     spoke.add(botId)
     budget.left -= 1
     setActivity(roomId, { speaking: [...(store.inspect((state) => getRoom(state, roomId)?.activity?.speaking) ?? []), bot.name] })
+    if (driveSession) beginStream(driveSession, bot.name, roomId)
     const controller = new AbortController()
     aborts.set(roomId, controller)
     try {
@@ -227,8 +267,6 @@ export function createSpeaker({ store, runner, dispatchRemote = null, gate = nul
         )
         text = result?.text
       } else if (external) {
-        // 有目录行时以它为准（id / sessionId / cwd 都在它身上）；否则就是成员行自己。
-        const speakerBot = directoryBot?.external === true ? directoryBot : bot
         text = (
           await runner.say(
             { id: speakerBot.id, sessionId: speakerBot.sessionId, cwd: speakerBot.cwd ?? undefined, external: true },
@@ -279,6 +317,7 @@ export function createSpeaker({ store, runner, dispatchRemote = null, gate = nul
         })
       })
     } finally {
+      if (driveSession) endStream(driveSession)
       // 只清自己那一个：用户停下之后紧接着开的新一轮有它自己的 controller，
       // 旧回合收尾时不能把新回合的「停」按钮弄哑。
       if (aborts.get(roomId) === controller) aborts.delete(roomId)
@@ -494,5 +533,5 @@ export function createSpeaker({ store, runner, dispatchRemote = null, gate = nul
     stop(roomId)
   }
 
-  return { afterHumanMessage, runRound, retryBot, stop, buildPrompt, forget }
+  return { afterHumanMessage, runRound, retryBot, stop, buildPrompt, forget, beginStream, pushStream, endStream }
 }

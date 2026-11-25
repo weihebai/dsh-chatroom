@@ -548,6 +548,21 @@ export function apply(ctx) {
     runtime.lan = lan
     const disposers = []
     let closed = false
+    // 实时增量：本机 agent 的 token 流，喂给房间的"正在输入"草稿（不落库）。
+    if (typeof ctx.on === 'function') {
+      disposers.push(
+        ctx.on('agent/assistant-stream', (payload) => {
+          const frame = payload && payload.frame
+          if (!frame || typeof frame.attemptId !== 'string') return
+          const sessionId = frame.attemptId.split(':')[0]
+          if (frame.type === 'chunk' && frame.chunk && frame.chunk.type === 'text-delta') {
+            speaker.pushStream?.(sessionId, String(frame.chunk.text ?? ''))
+          } else if (frame.type === 'end') {
+            speaker.endStream?.(sessionId)
+          }
+        }),
+      )
+    }
 
     const serviceFor = (key) => {
       const service = ctx.get?.(key) ?? ctx[key]

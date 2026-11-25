@@ -42,6 +42,19 @@ const settle = async (store) => {
   }
 }
 
+test('流式草稿：pushStream 写进 activity.streaming，endStream 清掉', () => {
+  const store = fakeStore(emptyState())
+  const room = createRoom(store.state, { name: '联调' })
+  const speaker = createSpeaker({ store, runner: { async say() { return { text: '' } } } })
+  speaker.beginStream('sess-x', 'A', room.id)
+  speaker.pushStream('sess-x', '你')
+  assert.equal(store.state.rooms[0].activity.streaming.text, '你')
+  speaker.pushStream('sess-x', '好') // 250ms 内被节流
+  assert.equal(store.state.rooms[0].activity.streaming.text, '你')
+  speaker.endStream('sess-x')
+  assert.ok(!store.state.rooms[0].activity || !store.state.rooms[0].activity.streaming)
+})
+
 test('房间规则：默认自动讨论 3 轮，可配置且被夹在 1..10', () => {
   assert.equal(DEFAULT_RULES.maxAutoRounds, 3)
   const state = emptyState()
