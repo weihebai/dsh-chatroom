@@ -26,11 +26,22 @@ const runtimeWith = (store, calls) => ({
   lan: null,
 })
 
-const addLocalAgent = (store, room, name, botId) =>
-  addMember(store.state, {
+const addLocalAgent = (store, room, name, botId) => {
+  store.state.bots.push({
+    id: botId,
+    name,
+    role: '',
+    sessionId: 'sess-' + name,
+    cwd: null,
+    createdAt: '',
+    lastError: null,
+    lastSpokeAt: null,
+  })
+  return addMember(store.state, {
     roomId: room.id,
     member: { id: 'm_' + botId, kind: 'bot', name, role: '', botId, sessionId: 'sess-' + name, origin: { kind: 'local' } },
   })
+}
 
 test('外部成员：external 标记保留，普通成员形状不变', () => {
   const state = emptyState()
@@ -85,6 +96,25 @@ test('send：用本机已创建 agent 的身份发，绝不新建成员', async 
   assert.match(last.text, /@frontend-dev/)
   assert.deepEqual(last.mentions, ['m_bot_frontend'])
   assert.equal(calls.length, 1)
+  // 发送即绑定：这只 agent 的会话换成当前会话，并被标成 external（@ 回来落在这里）。
+  const boundBot = store.state.bots.find((b) => b.id === 'bot_backend')
+  assert.equal(boundBot.sessionId, 'sess-mine')
+  assert.equal(boundBot.external, true)
+})
+
+test('bind:false 只发不绑，成员会话不动', async () => {
+  const store = fakeStore()
+  const room = createRoom(store.state, { name: '联调' })
+  addLocalAgent(store, room, 'backend-dev', 'bot_backend')
+  const calls = []
+  const tool = createChatroomTool(runtimeWith(store, calls))
+  await tool.execute(
+    { action: 'send', room: '联调', as: 'backend-dev', bind: false, to: [], text: '只是通知一下' },
+    { agent: { id: 'sess-mine' } },
+  )
+  const bot = store.state.bots.find((b) => b.id === 'bot_backend')
+  assert.equal(bot.sessionId, 'sess-backend-dev')
+  assert.notEqual(bot.external, true)
 })
 
 test('as 指向不存在的成员：报错并列出可用名字，不建成员', async () => {
@@ -158,6 +188,7 @@ test('镜像房间：用本机镜像成员的 botId 署名转发，本地不落�
   const store = fakeStore()
   const room = createRoom(store.state, { name: '他的屋' })
   room.remote = { host: 'http://127.0.0.1:1', port: 1, peerId: 'p1', machine: '同事的电脑' }
+  store.state.bots.push({ id: 'bot_backend', name: 'backend-dev', role: '', sessionId: 'sess-old', cwd: null, createdAt: '', lastError: null, lastSpokeAt: null })
   addMember(store.state, {
     roomId: room.id,
     member: { id: 'm_mine_agent', kind: 'bot', name: 'backend-dev', botId: 'bot_backend', sessionId: null, origin: { kind: 'local' } },
@@ -184,6 +215,9 @@ test('镜像房间：用本机镜像成员的 botId 署名转发，本地不落�
   assert.equal(sent[0].authorBotId, 'bot_backend')
   assert.deepEqual(sent[0].mentions, ['宿主agent'])
   assert.equal(store.state.rooms.find((row) => row.id === room.id).messages.length, 0)
+  const boundBot = store.state.bots.find((b) => b.id === 'bot_backend')
+  assert.equal(boundBot.sessionId, 'sess-mine')
+  assert.equal(boundBot.external, true)
 })
 
 test('镜像房间：notify 走局域网 silent', async () => {

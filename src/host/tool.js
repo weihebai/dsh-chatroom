@@ -31,6 +31,7 @@ const TOOL_PARAMETERS = {
     },
     room: { type: 'string', description: '房间名、房间码或 roomId。只有一间屋子时可以省略。' },
     as: { type: 'string', description: '用哪个成员的身份发言：必须是这间屋里你本机已经创建好的 agent 名字（比如「backend-dev」）。只有唯一一个本机 agent 时可以省略。' },
+    bind: { type: 'boolean', description: '发送时是否把这个成员绑定到当前会话，默认 true。绑定后房间里 @ 它会回到这个会话继续（上下文就是你现在的项目），而不是回到它早先自己开的旧会话；传 false 只发不绑。' },
     to: { type: 'array', items: { type: 'string' }, description: '要 @ 的成员名字列表（send 用）。' },
     text: { type: 'string', description: '消息正文。send / notify 必填。' },
     limit: { type: 'integer', description: 'read 返回多少条，默认 20，最多 200。' },
@@ -114,6 +115,30 @@ function withMentions(text, names) {
   return (missing.map((name) => '@' + name).join(' ') + ' ' + body).trim()
 }
 
+/**
+ * 把「这个成员」绑定到当前会话。
+ *
+ * 为什么需要：一只 agent 早先被驱动过一次，就已经有了自己的会话；之后房间再 @ 它，
+ * 默认会 resume 那个旧会话 —— 而那个会话的工作目录、上下文都不是你现在用的项目，
+ * 讨论自然对不上。绑定把它的 sessionId 换成当前会话，并标记为 external，
+ * 于是 speak/turn 走「先等空闲再递话」那条路，@ 回来直接落在你现在这个会话里。
+ */
+function bindSpeaker(store, member, sessionId) {
+  if (!member || !member.botId || !sessionId) return
+  store.commit((draft) => {
+    const bot = draft.bots.find((row) => row.id === member.botId)
+    if (!bot) return
+    bot.sessionId = sessionId
+    bot.external = true
+    bot.lastSpokeAt = null
+    for (const room of draft.rooms) {
+      for (const row of room.members) {
+        if (row.botId === bot.id) row.sessionId = sessionId
+      }
+    }
+  })
+}
+
 function lanOf(runtime) {
   const lan = runtime.lan
   if (!lan || typeof lan.send !== 'function') {
@@ -177,6 +202,7 @@ export function createChatroomTool(runtime, { log = () => {} } = {}) {
     if (action === 'notify') {
       if (!body) fail('message_empty', 'notify 需要 text。')
       const speaker = pickSpeaker(room, input.as)
+      if (input.bind !== false) bindSpeaker(store, speaker, sessionId)
       if (room.remote) {
         const lan = lanOf(runtime)
         await lan.announceAgents?.()
@@ -192,6 +218,7 @@ export function createChatroomTool(runtime, { log = () => {} } = {}) {
     if (action === 'send') {
       if (!body) fail('message_empty', 'send 需要 text。')
       const speaker = pickSpeaker(room, input.as)
+      if (input.bind !== false) bindSpeaker(store, speaker, sessionId)
       const others = names.filter((name) => name !== speaker.name)
       if (room.remote) {
         const lan = lanOf(runtime)
@@ -233,7 +260,7 @@ export function createChatroomTool(runtime, { log = () => {} } = {}) {
   return {
     name: TOOL_NAME,
     description:
-      '在 DeepSeek Harness 的群聊房间里发言。**工具不新建成员**：只能用你在这间屋里已经创建好的某个 agent 身份发言，名字由 as 指定（只有一个本机 agent 时可省略），找不到就报错并列出可用的名字。send：以该身份发消息并 @ 指定成员，被 @ 的 agent 会在它自己的会话里开始干活，这条不等它回复；notify：发一条不 @ 任何人的通知，只给人看；read：读最近的对话；list：看房间与成员（标明本机 / LAN 加入）；leave：把这个会话此前登记的成员身份移除。',
+      '在 DeepSeek Harness 的群聊房间里发言。**工具不新建成员**：只能用你在这间屋里已经创建好的某个 agent 身份发言，名字由 as 指定（只有一个本机 agent 时可省略），找不到就报错并列出可用的名字。send：以该身份发消息并 @ 指定成员，被 @ 的 agent 会在它自己的会话里开始干活，这条不等它回复；notify：发一条不 @ 任何人的通知，只给人看；read：读最近的对话；list：看房间与成员（标明本机 / LAN 加入）；leave：把这个会话此前登记的成员身份移除。发送默认会把用到的成员绑定到当前会话（之后 @ 它会回到这里继续），bind:false 可只发不绑。',
     parameters: TOOL_PARAMETERS,
     output: { schema: TOOL_OUTPUT_SCHEMA, render: (_args, value) => [{ type: 'text', text: value.message }] },
     execute,

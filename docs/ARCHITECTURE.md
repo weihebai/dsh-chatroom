@@ -295,6 +295,11 @@ DSH 自己的端口是 loopback + cookie + 每进程随机 token，**不能**拿
 别的机器（以及宿主自己）的 agent 一个都点不到，冒名报 `unknown_agent`。
 `notify` 带 `silent: true`：宿主只落库、不调 `onHumanMessage`，所以既不会触发 @ 也不会触发全员一轮。
 
+**发送即绑定**：`send` / `notify` 默认把用到的成员绑定到当前会话（`bot.sessionId` = 当前会话、
+`external = true`）。不绑的话，房间 @ 它时会 `resume` 它早先自己开的那个旧会话 —— 目录和上下文都不是
+你现在这个项目，讨论自然对不上（实测踩过：从 A 会话发消息，后面的讨论跑到了那个 agent 的旧会话里）。
+绑定后走「先等空闲再递话」，@ 回来直接落在你现在这个会话里。要只发不绑就传 `bind: false`。
+
 **两条路径的对应**：本机房间 = 直接 `postMessage` + `speaker.afterHumanMessage`（@ 谁就驱动谁）；
 镜像房间 = `lan.send({ authorBotId, silent })`，由宿主做同样两件事。工具的写路径只有这一处分叉。
 
