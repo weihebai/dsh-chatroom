@@ -277,3 +277,34 @@ test('发言调度：external 目录行也先等空闲再递话', async () => {
   assert.equal(seen[0].options.waitIdleFirst, true)
   assert.equal(store.state.rooms[0].messages.at(-1).authorId, member.id)
 })
+
+test('clear：清空聊天记录，成员和规则保留', async () => {
+  const store = fakeStore()
+  const room = createRoom(store.state, { name: '联调' })
+  addLocalAgent(store, room, 'backend-dev', 'bot_backend')
+  const calls = []
+  const tool = createChatroomTool(runtimeWith(store, calls))
+  await tool.execute({ action: 'send', room: '联调', as: 'backend-dev', to: [], text: '一句话' }, { agent: { id: 'sess-mine' } })
+  assert.equal(store.state.rooms[0].messages.length, 1)
+  const membersBefore = store.state.rooms[0].members.length
+  const result = await tool.execute({ action: 'clear', room: '联调' }, { agent: { id: 'sess-mine' } })
+  assert.match(result.message, /清空/)
+  assert.equal(store.state.rooms[0].messages.length, 0)
+  assert.equal(store.state.rooms[0].members.length, membersBefore)
+})
+
+test('session：new 换新会话，continue 回到上一个', async () => {
+  const store = fakeStore()
+  const room = createRoom(store.state, { name: '联调' })
+  addLocalAgent(store, room, 'backend-dev', 'bot_backend')
+  const tool = createChatroomTool(runtimeWith(store, []))
+  const bot = () => store.state.bots.find((b) => b.id === 'bot_backend')
+  const original = bot().sessionId
+  const fresh = await tool.execute({ action: 'session', room: '联调', as: 'backend-dev', mode: 'new' }, { agent: { id: 'sess-mine' } })
+  assert.match(fresh.message, /新会话/)
+  assert.notEqual(bot().sessionId, original)
+  assert.equal(bot().external, false)
+  const back = await tool.execute({ action: 'session', room: '联调', as: 'backend-dev', mode: 'continue' }, { agent: { id: 'sess-mine' } })
+  assert.match(back.message, /回到上一个会话/)
+  assert.equal(bot().sessionId, original)
+})

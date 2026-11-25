@@ -1,4 +1,5 @@
-import { postMessage, removeMember } from './rooms.js'
+import { randomUUID } from 'node:crypto'
+import { clearMessages, postMessage, removeMember } from './rooms.js'
 
 /**
  * 会话侧的聊天室工具：让正在跟你对话的这个 AI 能自己去群里喊人、报进度。
@@ -25,7 +26,7 @@ const TOOL_PARAMETERS = {
   properties: {
     action: {
       type: 'string',
-      enum: ['list', 'send', 'notify', 'read', 'leave'],
+      enum: ['list', 'send', 'notify', 'read', 'leave', 'clear', 'session'],
       description:
         'list 看房间与成员（标明本机 / LAN 加入）；send 以你本机创建好的某个 agent 身份发消息并 @ 人；notify 发一条不 @ 任何人的通知；read 读最近的对话；leave 把这个会话此前登记的成员身份从房间移除。',
     },
@@ -35,6 +36,7 @@ const TOOL_PARAMETERS = {
     to: { type: 'array', items: { type: 'string' }, description: '要 @ 的成员名字列表（send 用）。' },
     text: { type: 'string', description: '消息正文。send / notify 必填。' },
     limit: { type: 'integer', description: 'read 返回多少条，默认 20，最多 200。' },
+    mode: { type: 'string', enum: ['new', 'continue'], description: 'session 用：new 给这个 agent 开一个新会话（旧上下文不再带进来）；continue 回到上一个会话继续。' },
   },
   required: ['action'],
 }
@@ -186,6 +188,54 @@ export function createChatroomTool(runtime, { log = () => {} } = {}) {
       return { message: '已把这个会话的成员身份从 ' + targets.length + ' 个房间移除：' + targets.map((t) => t.roomName).join('、') + '。' }
     }
 
+    if (action === 'clear') {
+      if (room.remote) fail('remote_room', '这间屋子在别的机器上，清空要在那台机器上做。')
+      store.commit((draft) => clearMessages(draft, { roomId: room.id }))
+      runtime.speaker?.forget?.(room.id)
+      return { message: '已清空「' + room.name + '」的聊天记录（成员和规则保留）。' }
+    }
+
+    if (action === 'session') {
+      const member = pickSpeaker(room, input.as)
+      const bot = store.state.bots.find((row) => row.id === member.botId)
+      if (!bot) fail('bot_not_found', '这个成员没有对应的 agent，无法切会话。')
+      const mode = String(input.mode ?? 'new').trim()
+      if (mode === 'new') {
+        store.commit((draft) => {
+          const row = draft.bots.find((item) => item.id === bot.id)
+          if (!row) return
+          row.prevSessionId = row.sessionId ?? null
+          row.prevExternal = row.external === true
+          row.sessionId = randomUUID()
+          row.external = false
+          row.lastSpokeAt = null
+          for (const r of draft.rooms) {
+            for (const m of r.members) if (m.botId === row.id) m.sessionId = row.sessionId
+          }
+        })
+        return { message: '已让「' + member.name + '」开了一个新会话：之后房间跟它的讨论从零开始（工作目录不变）。' }
+      }
+      if (mode === 'continue') {
+        const prev = bot.prevSessionId
+        if (!prev) fail('no_previous_session', '「' + member.name + '」没有上一个会话可以回。')
+        store.commit((draft) => {
+          const row = draft.bots.find((item) => item.id === bot.id)
+          if (!row) return
+          const current = row.sessionId
+          row.sessionId = prev
+          row.external = row.prevExternal === true
+          row.prevSessionId = current
+          row.prevExternal = false
+          row.lastSpokeAt = null
+          for (const r of draft.rooms) {
+            for (const m of r.members) if (m.botId === row.id) m.sessionId = row.sessionId
+          }
+        })
+        return { message: '已让「' + member.name + '」回到上一个会话继续。' }
+      }
+      fail('bad_session_mode', 'session 的 mode 只能是 new 或 continue。')
+    }
+
     if (action === 'read') {
       const limit = Math.max(1, Math.min(200, Number(input.limit) || 20))
       const rows = room.messages
@@ -260,7 +310,7 @@ export function createChatroomTool(runtime, { log = () => {} } = {}) {
   return {
     name: TOOL_NAME,
     description:
-      '在 DeepSeek Harness 的群聊房间里发言。**工具不新建成员**：只能用你在这间屋里已经创建好的某个 agent 身份发言，名字由 as 指定（只有一个本机 agent 时可省略），找不到就报错并列出可用的名字。send：以该身份发消息并 @ 指定成员，被 @ 的 agent 会在它自己的会话里开始干活，这条不等它回复；notify：发一条不 @ 任何人的通知，只给人看；read：读最近的对话；list：看房间与成员（标明本机 / LAN 加入）；leave：把这个会话此前登记的成员身份移除。发送默认会把用到的成员绑定到当前会话（之后 @ 它会回到这里继续），bind:false 可只发不绑。',
+      '在 DeepSeek Harness 的群聊房间里发言。**工具不新建成员**：只能用你在这间屋里已经创建好的某个 agent 身份发言，名字由 as 指定（只有一个本机 agent 时可省略），找不到就报错并列出可用的名字。send：以该身份发消息并 @ 指定成员，被 @ 的 agent 会在它自己的会话里开始干活，这条不等它回复；notify：发一条不 @ 任何人的通知，只给人看；read：读最近的对话；list：看房间与成员（标明本机 / LAN 加入）；leave：把这个会话此前登记的成员身份移除；clear：清空这间屋的聊天记录（成员和规则保留）；session：mode=new 给某个 agent 开新会话（旧上下文不带入），mode=continue 回到上一个会话。发送默认会把用到的成员绑定到当前会话（之后 @ 它会回到这里继续），bind:false 可只发不绑。',
     parameters: TOOL_PARAMETERS,
     output: { schema: TOOL_OUTPUT_SCHEMA, render: (_args, value) => [{ type: 'text', text: value.message }] },
     execute,

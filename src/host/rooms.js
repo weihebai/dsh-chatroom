@@ -137,6 +137,19 @@ export function dissolveRoom(state, { roomId } = {}) {
   return room
 }
 
+/**
+ * 清空一间屋的历史消息。
+ *
+ * 只动 messages，不动成员、规则、nextSeq：seq 是客户端增量与未读游标的唯一基准，
+ * 清零会让所有人手里的游标错位。所以旧消息删掉，游标继续往前。
+ */
+export function clearMessages(state, { roomId } = {}) {
+  const room = requireRoom(state, roomId)
+  room.messages = []
+  room.activity = null
+  return room
+}
+
 export function addMember(state, { roomId, member } = {}) {
   const room = requireRoom(state, roomId)
   if (room.members.length >= LIMITS.members) fail('room_full')

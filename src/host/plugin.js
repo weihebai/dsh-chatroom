@@ -4,6 +4,7 @@ import { isAbsolute, join } from 'node:path'
 import { Store } from './state.js'
 import {
   addMember,
+  clearMessages,
   createRoom,
   dissolveRoom,
   getMember,
@@ -114,6 +115,13 @@ export async function dispatch({ store, speaker, gate = null, lan = null, comman
       store.commit((draft) =>
         updateRoom(draft, { roomId: input.roomId, name: input.name, topic: input.topic, rules: input.rules }),
       )
+      break
+    }
+    case 'room.clear': {
+      assertLocal(roomOf(input.roomId), '清空聊天记录')
+      store.commit((draft) => clearMessages(draft, { roomId: input.roomId }))
+      // 正在跑的那一轮随它去：记录都清了，它再吐出来的话也没地方落。
+      speaker?.forget?.(input.roomId)
       break
     }
     case 'room.dissolve': {

@@ -486,5 +486,13 @@ export function createSpeaker({ store, runner, dispatchRemote = null, gate = nul
     settle(roomId)
   }
 
-  return { afterHumanMessage, runRound, retryBot, stop, buildPrompt }
+  /** 房间被清空时用：停掉这一轮、丢掉排队与自动讨论的计数，一切从头开始。 */
+  function forget(roomId) {
+    pending.delete(roomId)
+    autoRounds.delete(roomId)
+    escalated.delete(roomId)
+    stop(roomId)
+  }
+
+  return { afterHumanMessage, runRound, retryBot, stop, buildPrompt, forget }
 }

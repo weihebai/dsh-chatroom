@@ -308,7 +308,23 @@ DSH 自己的端口是 loopback + cookie + 每进程随机 token，**不能**拿
 **两条路径的对应**：本机房间 = 直接 `postMessage` + `speaker.afterHumanMessage`（@ 谁就驱动谁）；
 镜像房间 = `lan.send({ authorBotId, silent })`，由宿主做同样两件事。工具的写路径只有这一处分叉。
 
-## 10. Agent 的工作目录
+## 10. 清空记录与换会话
+
+两件事都为同一个目的：旧内容不该继续污染后面的讨论。
+
+**清空聊天记录**（`room.clear`）：只清 `room.messages`，成员、规则、`nextSeq` 都保留。`seq` 是客户端增量
+与未读游标的唯一基准，清零会让所有人手里的游标错位，所以旧消息删掉、游标继续往前。界面右上角有
+「清空记录」按钮（只有本机房间；镜像房间要宿主管），工具也支持 `action=clear` 用指令清。清完顺手
+`speaker.forget(roomId)`，把正在跑的那一轮、排队的消息和自动讨论计数一起丢掉。
+
+**换会话**（工具 `action=session`）：
+
+- `mode=new`：给这个 agent 换一个全新的 `sessionId`（`external=false`，工作目录不变），旧上下文不再带进来 ——
+  这就是「让它开新会话」。
+- `mode=continue`：回到上一个会话继续（`prevSessionId` 单级回退）。
+- 换会话不会碰房间记录，只换这只 agent 的记忆；两者可以分开用。
+
+## 11. Agent 的工作目录
 
 一只 agent 只会说自己那一套「这个项目」的事，前提是它真的站在那个目录里。房间里的 agent
 过去都用会话默认目录（通常是启动目录），于是让它去对接一个具体项目时，它根本找不到。
