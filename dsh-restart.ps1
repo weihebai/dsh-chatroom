@@ -126,7 +126,7 @@ if (-not $Worker) {
 
   $self = $PSCommandPath
   if (-not $self) { $self = Join-Path $ScriptDir 'dsh-restart.ps1' }
-  $argList = @('-NoProfile','-ExecutionPolicy','Bypass','-File', $self, '-Worker', '-AppExe', $script:AppExe, '-ProcName', $script:ProcName)
+  $argList = @('-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File', $self, '-Worker', '-AppExe', $script:AppExe, '-ProcName', $script:ProcName)
   if ($Force) { $argList += '-Force' }
   $quoted  = ($argList | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' '
   $inner   = '"' + $pwsh + '" ' + $quoted
@@ -193,7 +193,7 @@ try {
 
   if (-not (Test-Path -LiteralPath $script:AppExe)) { throw "找不到可执行文件：$($script:AppExe)" }
   Write-Log "启动 $($script:AppExe)"
-  Start-Process -FilePath $script:AppExe -WorkingDirectory (Split-Path -Parent $script:AppExe)
+  Start-Process -FilePath $script:AppExe -WorkingDirectory (Split-Path -Parent $script:AppExe) -WindowStyle Normal
 
   $deadline = (Get-Date).AddSeconds($StartWaitSec)
   $ok = $false
