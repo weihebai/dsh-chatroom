@@ -84,6 +84,9 @@ export function createBotRunner(ctx, { log = () => {} } = {}) {
       agent = handle.agent ?? handle
     } catch (error) {
       log('resume-missed', error)
+      // 外部成员代表的是一个已存在的会话；找不到就不能凭空造一个同 id 的，
+      // 那会变成两份记忆。让调用方看到明确的原因。
+      if (bot.external === true) fail('session_unavailable', '这个成员对应的会话当前不在本机，无法发言。')
       const handle = await registry.create({ sessionId: bot.sessionId, meta, agentOptions })
       agent = handle.agent ?? handle
     }
@@ -137,8 +140,14 @@ export function createBotRunner(ctx, { log = () => {} } = {}) {
    * 让一个 Bot 说一句话。
    * @returns {Promise<{text: string, sessionId: string}>}
    */
-  async function say(bot, prompt, { signal } = {}) {
+  async function say(bot, prompt, { signal, waitIdleFirst = false } = {}) {
     const agent = await ensureAgent(bot)
+    // 外部成员背后是用户正在用的那个会话，它可能还在跑自己的回合。
+    // 先等它闲下来再递话 —— 否则那句「轮到你」会被塞进正在进行的回合里，
+    // 跑完读回来的其实是这一轮原本的回答，而不是对房间那句话的回应。
+    if (waitIdleFirst && agent.status === 'running' && typeof agent.whenIdle === 'function') {
+      await agent.whenIdle(signal)
+    }
     const baseline = await baselineOf(bot.sessionId)
     const message = userMessage({
       content: [{ type: 'text', text: prompt }],

@@ -1,4 +1,4 @@
-import { botsOf, getMember, getRoom, isRemoteMember, mentionedBots, postMessage, transcriptOf } from './rooms.js'
+import { botsOf, getMember, getRoom, isExternalMember, isRemoteMember, mentionedBots, postMessage, transcriptOf } from './rooms.js'
 
 /**
  * 三条发言规则并行存在 —— 这就是它们的调度器。
@@ -99,6 +99,14 @@ export function createSpeaker({ store, runner, dispatchRemote = null, gate = nul
   /** 发言中间收到的人消息：不丢，排到这一轮结束后接着处理。 */
   const pending = new Map()
   const PENDING_LIMIT = 8
+  /**
+   * 连续「由 agent 自己引出」的回合计数（roomId → 次数）。
+   *
+   * 人发的消息永远清零；agent 用 room 工具发的话才累加。到顶就不再自动开新一轮 ——
+   * 没有这道闸，两个 agent 可以互相「收到」「好的」一直转下去，每一圈都是一次真实模型调用。
+   */
+  const autoRounds = new Map()
+  const MAX_AUTO_ROUNDS = 2
 
   /**
    * 这一轮是谁的话引出来的。
@@ -166,7 +174,11 @@ export function createSpeaker({ store, runner, dispatchRemote = null, gate = nul
     // 本机只负责「这一轮轮到你了」把 prompt 派过去。
     const remote = isRemoteMember(bot)
     const directoryBot = remote ? null : store.inspect((state) => state.bots.find((row) => row.id === bot.botId))
-    if (!remote && !directoryBot) {
+    // 外部成员有两副样子：本机房间里是一条只带 sessionId 的成员行（没有目录行）；
+    // 局域网房间里是报给宿主的一个 agent，本机 state.bots 里有目录行但 external=true。
+    // 两种都代表「用户正在用的那个会话」，都必须先等空闲再递话。
+    const external = !remote && (isExternalMember(bot) || directoryBot?.external === true)
+    if (!remote && !external && !directoryBot) {
       log('bot_missing', botId)
       return
     }
@@ -213,6 +225,16 @@ export function createSpeaker({ store, runner, dispatchRemote = null, gate = nul
           controller.signal,
         )
         text = result?.text
+      } else if (external) {
+        // 有目录行时以它为准（id / sessionId / cwd 都在它身上）；否则就是成员行自己。
+        const speakerBot = directoryBot?.external === true ? directoryBot : bot
+        text = (
+          await runner.say(
+            { id: speakerBot.id, sessionId: speakerBot.sessionId, cwd: speakerBot.cwd ?? undefined, external: true },
+            prompt,
+            { signal: controller.signal, waitIdleFirst: true },
+          )
+        ).text
       } else {
         text = (await runner.say({ ...directoryBot, cwd: directoryBot.cwd ?? undefined }, prompt, { signal: controller.signal })).text
       }
@@ -349,6 +371,19 @@ export function createSpeaker({ store, runner, dispatchRemote = null, gate = nul
    * 不 await：房间面板先看到人那条，agent 的回复随 watch 一帧一帧出现。
    */
   function afterHumanMessage({ roomId, messageId }) {
+    const room = roomOrFail(roomId)
+    const message = room.messages.find((row) => row.id === messageId)
+    // 人说话清零自动回合计数；agent 说话才累加，到顶就不再自动开新一轮。
+    if (!message || message.authorKind === 'human') {
+      autoRounds.delete(roomId)
+    } else {
+      const count = autoRounds.get(roomId) ?? 0
+      if (count >= MAX_AUTO_ROUNDS) {
+        log('auto_round_capped', { roomId, count })
+        return
+      }
+      autoRounds.set(roomId, count + 1)
+    }
     if (running.has(roomId)) {
       // 别把用户插进来的话吞掉：攒着，等这一轮跑完再按规则处理。
       queuePending(roomId, messageId)

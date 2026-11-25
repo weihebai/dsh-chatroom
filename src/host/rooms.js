@@ -160,6 +160,9 @@ export function addMember(state, { roomId, member } = {}) {
     // instance 不会变 —— 宿主重启或清扫之后，靠它把同一组成员 id 接回去。
     seat: typeof member.seat === 'string' && member.seat ? member.seat.slice(0, 64) : null,
   }
+  // 外部成员：背后是一个已经活着的会话（用户正在聊的那个），不是插件自己开的 agent。
+  // 只在真的是外部成员时才写这个字段，普通成员的形状保持不变。
+  if (member.external === true) row.external = true
   room.members.push(row)
   return row
 }
@@ -178,6 +181,9 @@ export function normalizeOrigin(origin) {
 
 /** 这台机器之外的人和他带的 agent：他们的回合必须派发出去，不能本地跑。 */
 export const isRemoteMember = (member) => Boolean(member && member.owner && member.owner !== 'local')
+
+/** 这个成员背后是一个已经活着的会话（就是用户正在聊的那个），不是插件自己开的 agent。 */
+export const isExternalMember = (member) => Boolean(member && member.external === true)
 
 /** 某个 peer 在这间屋子里占的所有成员。断线/离开时整组撤掉。 */
 export function membersOfPeer(room, peerId) {

@@ -487,7 +487,10 @@ export function createLanGuest({ store, runner, gate = null, log = () => {} } = 
       }
     }
     try {
-      const { text } = await runner.say({ ...bot, cwd: bot.cwd ?? undefined }, assignment.prompt)
+      // 外部成员背后是本机正在用的那个会话：它可能还在跑自己的回合，先等空闲再递话。
+      const { text } = await runner.say({ ...bot, cwd: bot.cwd ?? undefined }, assignment.prompt, {
+        waitIdleFirst: bot.external === true,
+      })
       await send({ text })
     } catch (error) {
       log('lan_assignment_failed', { botId: bot.id, error })
@@ -495,7 +498,7 @@ export function createLanGuest({ store, runner, gate = null, log = () => {} } = 
     }
   }
 
-  async function send({ roomId, text, mentions, replyTo, opKey }) {
+  async function send({ roomId, text, mentions, replyTo, opKey, authorBotId, silent }) {
     const record = linkByRoom(roomId)
     if (!record) fail('remote_room_unknown', '这个房间不是从别的机器同步来的。')
     return withPeer(record, async (peer) => {
@@ -504,7 +507,17 @@ export function createLanGuest({ store, runner, gate = null, log = () => {} } = 
       const declared = (Array.isArray(mentions) ? mentions : []).map((id) => (id === 'me' ? peer.selfMemberId : id))
       const value = await postJson(
         `${baseUrl(peer.host, peer.port)}/lan/message`,
-        { peerId: peer.peerId, text, mentions: declared, replyTo, opKey },
+        {
+          peerId: peer.peerId,
+          text,
+          mentions: declared,
+          replyTo,
+          opKey,
+          // 以本机某个 agent 的身份发：宿主只认「这条连接名下」的 agent，冒不了别人的名。
+          ...(authorBotId ? { authorBotId } : {}),
+          // 只落一条消息、不触发任何回合（完成通知用）。
+          ...(silent === true ? { silent: true } : {}),
+        },
         { timeoutMs: 20_000 },
       )
       applyRemote(peer.id, value.snapshot)

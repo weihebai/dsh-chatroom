@@ -737,11 +737,22 @@ export function createLanHost({ store, onHumanMessage = () => {}, log = logDefau
         if (!room) fail('room_not_found', '这间屋子已经不在了。')
         const text = textOf(input.text)
         if (text === null) fail('bad_text', '正文只能是字符串。')
+        // 默认以「那台机器上的人」署名；带了 authorBotId 就用它名下报备过的 agent。
+        // 只在这一条连接自己的成员里找 —— 别的机器的 agent 一个都点不到，冒不了名。
+        const authorBotId = typeof input.authorBotId === 'string' ? input.authorBotId.trim().slice(0, 64) : ''
+        let authorId = peer.selfMemberId
+        if (authorBotId) {
+          const agent = room.members.find(
+            (member) => member.owner === peer.id && member.kind === 'bot' && member.botId === authorBotId,
+          )
+          if (!agent) fail('unknown_agent', '这台机器报的 agent 不在这间屋里，拒绝冒名。')
+          authorId = agent.id
+        }
         let posted = null
         store.commit((draft) => {
           posted = postMessage(draft, {
             roomId: peer.roomId,
-            authorId: peer.selfMemberId,
+            authorId,
             text,
             mentions: input.mentions,
             replyTo: input.replyTo,
@@ -749,7 +760,8 @@ export function createLanHost({ store, onHumanMessage = () => {}, log = logDefau
             opKey: input.opKey,
           })
         })
-        if (posted) onHumanMessage({ roomId: peer.roomId, messageId: posted.id })
+        // silent：只落库、不触发任何回合（完成通知走这条）。
+        if (posted && input.silent !== true) onHumanMessage({ roomId: peer.roomId, messageId: posted.id })
         value = { messageId: posted?.id ?? null, seq: posted?.seq ?? null, snapshot: viewFor(peer) }
       } else if (path === '/lan/assignments' && request.method === 'GET') {
         const peer = requirePeer(url.searchParams.get('peerId'))

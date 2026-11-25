@@ -668,3 +668,55 @@ test('跑着的宿主会清掉真的关掉的机器，但不会清正在长轮�
     await host.dispose()
   }
 })
+
+test('LAN 署名：authorBotId 只能署自己报备过的 agent；silent 只落库不触发回合', async () => {
+  const host = await boot('host-author')
+  const guest = await boot('guest-author')
+  try {
+    const created = await command(host, 'room.create', { name: '联调屋' })
+    const roomId = created.rooms[0].id
+    await command(host, 'member.createBot', { roomId, name: 'Claude' })
+    const port = (await snapshot(host)).lan.port
+    const hostBotId = (await snapshot(host)).bots[0].id
+
+    const local = await command(guest, 'room.create', { name: '我的屋子' })
+    await command(guest, 'member.createBot', { roomId: local.rooms[0].id, name: '阿甲' })
+    const guestBotId = (await snapshot(guest)).bots[0].id
+    const joined = await command(guest, 'lan.join', { host: '127.0.0.1', port, code: created.rooms[0].code })
+    const peerId = joined.rooms.find((room) => room.remote).remote.peerId
+
+    const post = async (payload) => {
+      const response = await fetch('http://127.0.0.1:' + port + '/lan/message', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(Object.assign({ peerId }, payload)),
+      })
+      return { status: response.status, body: await response.json() }
+    }
+
+    // 以自己报备过的 agent 署名：宿主认，落库署名是「阿甲」；silent 不触发任何回合。
+    const sent = await post({ text: '我以阿甲的身份说一句。', authorBotId: guestBotId, silent: true })
+    assert.equal(sent.body.ok, true, JSON.stringify(sent.body))
+    const room = (await snapshot(host)).rooms.find((row) => row.id === roomId)
+    const message = room.messages.find((row) => row.text.includes('以阿甲的身份'))
+    assert.ok(message, '消息应该落进宿主房间')
+    assert.equal(message.authorName, '阿甲')
+    assert.equal(message.authorKind, 'bot')
+    assert.equal(message.origin.kind, 'lan')
+    await tick(120)
+    assert.equal(host.prompts.length, 0, 'silent 不该触发宿主的 agent')
+    assert.equal(guest.prompts.length, 0, 'silent 不该派发到加入方')
+
+    // 冒名：用宿主自己 agent 的 id，不属于这条连接 → 拒绝。
+    const spoof = await post({ text: '我是 Claude', authorBotId: hostBotId })
+    assert.equal(spoof.body.ok, false)
+    assert.equal(spoof.body.error.code, 'unknown_agent')
+    // 不存在的 id 同样拒绝。
+    const bogus = await post({ text: '我是幽灵', authorBotId: 'bot_nobody' })
+    assert.equal(bogus.body.ok, false)
+    assert.equal(bogus.body.error.code, 'unknown_agent')
+  } finally {
+    await host.dispose()
+    await guest.dispose()
+  }
+})

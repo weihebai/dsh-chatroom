@@ -19,6 +19,7 @@ import { createGate, LEVELS } from './guard.js'
 import { createLanBridge } from './lan-bridge.js'
 import { markApplied } from './code.js'
 import { isWhaleColor } from './palette.js'
+import { createChatroomTool } from './tool.js'
 import { pageMessages, project } from './project.js'
 
 export { project } from './project.js'
@@ -469,6 +470,23 @@ async function readEnvelope(request) {
 }
 
 export function apply(ctx) {
+  /**
+   * 会话工具的锚点。
+   *
+   * store / speaker 是在下面那个 effect 里异步建出来的，而工具的注册可能先于它们完成；
+   * 所以工具只拿一个「随时读当前实例」的引用，execute 时才看有没有 —— 缺了就说还没准备好，
+   * 不让注册顺序把整个插件拖死（和 todo_board 用 ctx.inject 是同一个理由）。
+   */
+  const runtime = { store: null, speaker: null, lan: null }
+  const registerTool = (toolsCtx) => {
+    const tools = toolsCtx?.get?.('tools') ?? toolsCtx?.tools
+    if (!tools || typeof tools.register !== 'function') return
+    ctx.effect(() => tools.register(createChatroomTool(runtime, { log })), 'dsh-chatroom: chatroom tool')
+  }
+  // 真宿主上 tools 可能比这里晚一步出现，所以走 inject；测试用的最小 ctx 没有 inject，
+  // 也没有 tools 服务，直接跳过即可（工具本身另有单测）。
+  if (typeof ctx.inject === 'function') ctx.inject(['tools'], registerTool)
+  else if (ctx.get?.('tools')) registerTool(ctx)
   return ctx.effect(async () => {
     const profile = ctx.profileContext ?? ctx.get?.('profileContext')
     const dir = join(profile.dir, 'dsh-chatroom')
@@ -481,6 +499,10 @@ export function apply(ctx) {
     const lan = createLanBridge({ store, runner, gate, log })
     const speaker = createSpeaker({ store, runner, gate, dispatchRemote: lan.enqueue, log })
     lan.setSpeaker(speaker)
+    // 工具从这里开始才真正能用；插件一卸载就清掉，避免拿着已经关闭的 store 继续写。
+    runtime.store = store
+    runtime.speaker = speaker
+    runtime.lan = lan
     const disposers = []
     let closed = false
 
@@ -545,6 +567,9 @@ export function apply(ctx) {
       markApplied()
       return async () => {
         closed = true
+        runtime.store = null
+        runtime.speaker = null
+        runtime.lan = null
         // 还在等本机点按钮的那几条，随插件一起作废：留着只会让回合收不干净。
         gate.dispose()
         await lan.dispose()
