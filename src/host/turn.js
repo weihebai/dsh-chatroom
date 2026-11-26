@@ -46,8 +46,13 @@ export function createBotRunner(ctx, { log = () => {} } = {}) {
 
   const idOf = (reply) => reply?.data?.message?.id ?? null
 
+  // 建会话、挂 preset 必须走 root 上下文：走插件自己的 fiber 时 preset 的激活审计
+  // 会失败（隔离域不同），会话建出来能用但没有工具。
+  const rootCtx = () => ctx.root ?? ctx
+
   function requireService(key) {
-    const service = ctx.get?.(key) ?? ctx[key]
+    const root = rootCtx()
+    const service = root.get?.(key) ?? root[key] ?? ctx.get?.(key) ?? ctx[key]
     if (!service) fail(`${key}_unavailable`, `DSH 服务 ${key} 不可用，无法让 agent 发言。`)
     return service
   }
@@ -107,12 +112,13 @@ export function createBotRunner(ctx, { log = () => {} } = {}) {
     // 只给 cwd 不够：工具（终端、文件、检索）和系统提示都在 agent preset 里，
     // 不挂 preset 的会话能说话、但没有任何工具，就会回「没有可用的命令执行能力」。
     let setup
-    const presets = ctx.get?.('agentPresets') ?? ctx.agentPresets
+    const presets = rootCtx().get?.('agentPresets') ?? rootCtx().agentPresets
     if (presets && typeof presets.resolve === 'function') {
       try {
         const resolved = await presets.resolve()
         if (resolved?.id) {
           meta.agentPreset = resolved.id
+          if (resolved.broken) log('preset_broken', resolved.broken)
           setup = async (agentCtx) => {
             await presets.mount(agentCtx, resolved.id)
           }
