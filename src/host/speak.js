@@ -470,8 +470,8 @@ export function createSpeaker({ store, runner, dispatchRemote = null, gate = nul
       null
     const who = owner ? '@' + owner.name : '@房主'
     const text =
-      '（自动讨论已经进行 ' + limit + ' 轮，仍未达成一致，先停在这里）' +
-      who + ' 请你拍板：继续让他们聊，还是按哪个方案走。'
+      '（自动讨论已达 ' + limit + ' 轮上限，先停在这里；这只是轮次到了，不代表谁对谁错）' +
+      who + ' 要继续聊，还是按某个方案走，你定。'
     store.commit((draft) => {
       const row = getRoom(draft, roomId)
       if (!row) return

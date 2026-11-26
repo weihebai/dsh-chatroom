@@ -98,8 +98,8 @@ test('自动讨论到顶：@ 房主拍板并停手，人说话后重新计数', 
   await settle(store)
   assert.equal(calls, 1, '到顶之后不该再跑模型')
   const escalateMsg = state.rooms[0].messages.at(-1)
-  assert.match(escalateMsg.text, /自动讨论已经进行 1 轮/)
-  assert.match(escalateMsg.text, /请你拍板/)
+  assert.match(escalateMsg.text, /自动讨论已达 1 轮上限/)
+  assert.match(escalateMsg.text, /你定/)
   assert.match(escalateMsg.text, /@我/, '应该 @ 房主')
 
   // 再来的 agent 消息不会重复提醒
@@ -107,7 +107,7 @@ test('自动讨论到顶：@ 房主拍板并停手，人说话后重新计数', 
   speaker.afterHumanMessage({ roomId: room.id, messageId: third.id })
   await settle(store)
   assert.equal(state.rooms[0].messages.length, beforeCount + 3, '第三条 agent 消息照常落库，但不应再多出第二条提醒')
-  const escalateCount = state.rooms[0].messages.filter((m) => /自动讨论已经进行/.test(m.text)).length
+  const escalateCount = state.rooms[0].messages.filter((m) => /自动讨论已达/.test(m.text)).length
   assert.equal(escalateCount, 1, '同一串讨论只提醒一次')
 
   // 人说话：计数清零，可以重新讨论
