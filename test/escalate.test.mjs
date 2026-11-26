@@ -169,3 +169,24 @@ test('同一条人消息重复进来，只驱动同一个 agent 一轮', async (
   await settle(store)
   assert.deepEqual(called, ['后端'])
 })
+
+test('提示词：远程派发按收件人视角标「本机」，并要求先执行再回复', () => {
+  const state = emptyState()
+  const room = createRoom(state, { name: '视角' })
+  const store = fakeStore(state)
+  addBot(store, room, '本机agent', 'b_local')
+  addMember(state, {
+    roomId: room.id,
+    member: { id: 'm_remote', kind: 'bot', name: '远程agent', role: '前端', botId: 'b_remote', origin: { kind: 'lan', peer: 'peer-1', machine: 'hm' } },
+  })
+  const speaker = createSpeaker({ store, runner: { async say() { return { text: '' } } } })
+  const prompt = speaker.buildPrompt({
+    room: state.rooms[0],
+    bot: { id: 'm_remote', name: '远程agent' },
+    at: 'mention',
+    viewerPeer: 'peer-1',
+  })
+  assert.match(prompt, /远程agent（agent，前端，本机（你这台机器）/)
+  assert.match(prompt, /本机agent（agent，宿主那台机器/)
+  assert.match(prompt, /执行请求/)
+})

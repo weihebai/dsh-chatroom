@@ -48,13 +48,21 @@ function withAbort(promise, signal) {
   return Promise.race([promise, aborted])
 }
 
-function buildPrompt({ room, bot, at }) {
+function buildPrompt({ room, bot, at, viewerPeer = null }) {
   const memberLine = room.members
     .map((member) => {
       const kind = member.kind === 'human' ? '人' : 'agent'
       // 说「从哪台机器来」而不是那条连接的 peer 地址：peer 是进程现发的（重启就变），
       // 机器名才是这个模型能记住、人能对上号的东西。
-      const where = member.origin?.kind === 'lan' ? `，从 LAN 进来（${member.origin.machine || member.origin.peer || '远程'}）` : '，本机'
+      // 远程派发时提示词由宿主拼、在对方机器上执行：「本机」要按收件人那台机器算，否则加入方会看到反过来的主谓。
+      const mine = viewerPeer !== null && member.origin?.kind === 'lan' && member.origin.peer === viewerPeer
+      const where = mine
+        ? '，本机（你这台机器）'
+        : viewerPeer !== null && member.origin?.kind !== 'lan'
+          ? '，宿主那台机器'
+          : member.origin?.kind === 'lan'
+            ? `，从 LAN 进来（${member.origin.machine || member.origin.peer || '远程'}）`
+            : '，本机'
       const role = member.role ? `，${member.role}` : ''
       return `- ${member.name}（${kind}${role}${where}）`
     })
@@ -90,7 +98,7 @@ function buildPrompt({ room, bot, at }) {
       ? '现在轮到你这个主持人发言：先把大家的分歧点出来，给出你的判断；需要谁补充，就在话里 @ 他的名字。'
       : at === 'round'
         ? '现在轮到你发言：就上面的话题说你自己的看法，可以顺着别人的话补充或反驳。'
-        : '现在轮到你了：回应上面提到你或与你有关的内容。',
+        : '这是一条执行请求：先用工具实际做完（读代码、改文件、跑命令、查接口），再回复结果；不要只回「收到」「好的」。做完后 @ 回请求你的人，把结论和可核对的事实（命令输出、文件路径、接口字段）一起给出。',
     overLimit
       ? `你上一条发言 ${mine.text.length} 字，超过这间房 ${room.rules.maxChars} 字的上限；这一条务必先给结论、压到上限内。`
       : '',
@@ -249,7 +257,7 @@ export function createSpeaker({ store, runner, dispatchRemote = null, gate = nul
     aborts.set(roomId, controller)
     try {
       const roomNow = roomOrFail(roomId)
-      const prompt = buildPrompt({ room: roomNow, bot, at })
+      const prompt = buildPrompt({ room: roomNow, bot, at, viewerPeer: remote ? bot.origin?.peer ?? null : null })
       // 本机授权：这句话是别的机器上的人/agent 引出来的，那就先问本机的人。
       // 本机的人自己 @、自己点重试、自己点全员轮次都不问 —— 否则每句都要点一次。
       if (!remote && gate && trigger?.kind === 'lan') {
