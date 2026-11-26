@@ -71,7 +71,9 @@ export function createLanBridge({ store, runner, gate = null, log = () => {}, ma
     // 换「我在这间屋里」的虎鲸座位：宿主会拒掉被别人占着的那一档。
     setColor: (linkId, color) => guest.setColor(linkId, color),
     // 「加入之后才建 agent」这条路：本机名单变了就报给宿主，让屋里立刻有人。
-    announceAgents: () => guest.announceAgents(),
+    announceAgents: (onlyId) => guest.announceAgents(onlyId),
+    // 某间屋的 agent 名单增删：只改这一条链接（这一间屋），不碰 agent 本体和别的房间。
+    setAgentInRoom: (roomId, botId, included) => guest.setAgentInRoom(roomId, botId, included),
     linkByRoom: (roomId) => guest.linkByRoom(roomId),
   }
 }

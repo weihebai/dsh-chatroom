@@ -187,7 +187,29 @@ export async function dispatch({ store, speaker, gate = null, lan = null, comman
       break
     }
     case 'member.createBot': {
-      assertLocal(roomOf(input.roomId), '加 agent')
+      const createTarget = roomOf(input.roomId)
+      // 镜像房间：在本机建 agent，再报到这间屋里（宿主按名单收人）。成员真身在宿主那边，本机不落成员。
+      if (createTarget?.remote) {
+        const mirrorBotCwd = normalizeCwd(input.cwd) ?? null
+        let createdBot = null
+        store.commit((draft) => {
+          createdBot = {
+            id: `bot_${randomUUID().replace(/-/g, '').slice(0, 12)}`,
+            name: String(input.name ?? '').trim().slice(0, 60) || '新 agent',
+            role: String(input.role ?? '').trim().slice(0, 200),
+            sessionId: randomUUID(),
+            cwd: mirrorBotCwd,
+            createdAt: new Date().toISOString(),
+            lastError: null,
+            lastSpokeAt: null,
+          }
+          draft.bots.push(createdBot)
+        })
+        if (!lan) throw Object.assign(new Error('LAN 不可用'), { code: 'lan_unavailable' })
+        await lan.setAgentInRoom(createTarget.id, createdBot.id, true)
+        break
+      }
+      assertLocal(createTarget, '加 agent')
       const memberBotCwd = normalizeCwd(input.cwd) ?? null
       store.commit((draft) => {
         const bot = {
@@ -218,7 +240,15 @@ export async function dispatch({ store, speaker, gate = null, lan = null, comman
       break
     }
     case 'member.addBot': {
-      assertLocal(roomOf(input.roomId), '加 agent')
+      const addTarget = roomOf(input.roomId)
+      if (addTarget?.remote) {
+        const addBot = state.bots.find((row) => row.id === input.botId)
+        if (!addBot) throw Object.assign(new Error('bot_not_found'), { code: 'bot_not_found' })
+        if (!lan) throw Object.assign(new Error('LAN 不可用'), { code: 'lan_unavailable' })
+        await lan.setAgentInRoom(addTarget.id, addBot.id, true)
+        break
+      }
+      assertLocal(addTarget, '加 agent')
       store.commit((draft) => {
         const bot = draft.bots.find((row) => row.id === input.botId)
         if (!bot) throw Object.assign(new Error('bot_not_found'), { code: 'bot_not_found' })
@@ -279,7 +309,22 @@ export async function dispatch({ store, speaker, gate = null, lan = null, comman
       break
     }
     case 'member.remove': {
-      assertLocal(roomOf(input.roomId), '移出成员')
+      const removeTarget = roomOf(input.roomId)
+      if (removeTarget?.remote) {
+        const row = removeTarget.members.find((member) => member.id === input.memberId)
+        const bot = row?.botId ? state.bots.find((item) => item.id === row.botId) : null
+        // 只能移出自己的（本机带上去的）agent；别人的 agent 得去他那台机器上移。
+        if (!row || row.origin?.kind === 'lan' || !bot) {
+          throw Object.assign(
+            new Error(`这间屋子在 ${removeTarget.remote.machine || removeTarget.remote.host} 上，只能移出你自己带上去的 agent。`),
+            { code: 'remote_room' },
+          )
+        }
+        if (!lan) throw Object.assign(new Error('LAN 不可用'), { code: 'lan_unavailable' })
+        await lan.setAgentInRoom(removeTarget.id, bot.id, false)
+        break
+      }
+      assertLocal(removeTarget, '移出成员')
       store.commit((draft) => removeMember(draft, { roomId: input.roomId, memberId: input.memberId }))
       break
     }

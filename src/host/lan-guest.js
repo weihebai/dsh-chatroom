@@ -121,6 +121,16 @@ export function createLanGuest({ store, runner, gate = null, log = () => {} } = 
    * 由宿主按空档安排。人给自己屋里的 agent 挑色走 member.update，不经过这里。
    */
   const agentsPayload = () => store.state.bots.map((bot) => ({ id: bot.id, name: bot.name, role: bot.role }))
+  /**
+   * 某一间屋该报哪些 agent。默认全带；这间屋里被移出的记在 link.agentExcluded 里，
+   * 这样「移出这间屋」只影响这一条链接（也就是这一间屋），agent 本体和别的房间都不动。
+   */
+  const agentsPayloadFor = (link) => {
+    const excluded = new Set(link?.agentExcluded ?? [])
+    return store.state.bots
+      .filter((bot) => !excluded.has(bot.id))
+      .map((bot) => ({ id: bot.id, name: bot.name, role: bot.role }))
+  }
 
   function runtimeOf(linkId) {
     let runtime = runtimes.get(linkId)
@@ -294,7 +304,7 @@ export function createLanGuest({ store, runner, gate = null, log = () => {} } = 
         // 名字与这间屋的虎鲸座位一起报：加入表单里选过色的，colorPicked=true，
         // 宿主会拒绝「抢别人那一档」而不是替他换一档。
         self: selfPayload(color, Boolean(explicit)),
-        agents: agentsPayload(),
+        agents: agentsPayloadFor(existing),
         build: BUILD,
       },
       { timeoutMs: 15_000 },
@@ -348,7 +358,7 @@ export function createLanGuest({ store, runner, gate = null, log = () => {} } = 
             // 重连不是「重新挑颜色」：报上次坐的那一档，colorPicked=false ——
             // 被占了由宿主按空档安排，不让整条连接因为一个颜色断掉。
             self: selfPayload(record.color, false),
-            agents: agentsPayload(),
+            agents: agentsPayloadFor(record),
             build: BUILD,
           },
           { timeoutMs: 15_000 },
@@ -637,8 +647,8 @@ export function createLanGuest({ store, runner, gate = null, log = () => {} } = 
    * agent 都没有。不补这一步，屋里就永远只有他一个人，而对面的成员列毫无提示。
    * 改名/改职责、删掉 agent 也走这条：宿主那边对账，历史消息保留当时的署名。
    */
-  async function announceAgents() {
-    const records = links().filter((record) => record.status !== 'gone')
+  async function announceAgents(onlyId = null) {
+    const records = links().filter((record) => record.status !== 'gone' && (!onlyId || record.id === onlyId))
     let last = null
     for (const record of records) {
       last = await withPeer(record, async (peer) => {
@@ -646,7 +656,7 @@ export function createLanGuest({ store, runner, gate = null, log = () => {} } = 
           `${baseUrl(peer.host, peer.port)}/lan/agents`,
           {
             peerId: peer.peerId,
-            agents: agentsPayload(),
+            agents: agentsPayloadFor(peer),
           },
           { timeoutMs: 8000 },
         )
@@ -663,6 +673,24 @@ export function createLanGuest({ store, runner, gate = null, log = () => {} } = 
       })
     }
     return last
+  }
+
+  /**
+   * 把某个本机 agent 放进/移出某间镜像房间：只改这条链接的排除名单，再单独向它报一次。
+   * 宿主按名单对账，多退少补；其他房间各自一份名单，互不影响。
+   */
+  async function setAgentInRoom(roomId, botId, included) {
+    const record = linkByRoom(roomId)
+    if (!record) fail('remote_room_not_found', '这间屋子不是从本机加入的，改不了它的成员。')
+    store.commit((draft) => {
+      const link = (draft.links ?? []).find((row) => row.id === record.id)
+      if (!link) return
+      const set = new Set(link.agentExcluded ?? [])
+      if (included) set.delete(botId)
+      else set.add(botId)
+      link.agentExcluded = [...set]
+    })
+    return announceAgents(record.id)
   }
 
   async function leave(linkId) {
@@ -716,5 +744,5 @@ export function createLanGuest({ store, runner, gate = null, log = () => {} } = 
     }
   }
 
-  return { join, leave, send, read, page, rename, setColor, resume, stop, snapshotView, linkByRoom, links, announceAgents }
+  return { join, leave, send, read, page, rename, setColor, resume, stop, snapshotView, linkByRoom, links, announceAgents, setAgentInRoom }
 }

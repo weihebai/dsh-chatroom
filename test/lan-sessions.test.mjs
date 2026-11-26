@@ -189,3 +189,39 @@ test('加入方能在镜像房间给自己带上去的 agent 换新会话，宿�
     await host.dispose().catch(() => {})
   }
 })
+
+test('加入方在镜像房间移出自己的 agent：只离开这间屋，agent 与本机房间都不受影响，也能再加回来', async () => {
+  const host = await boot('rm-host')
+  const guest = await boot('rm-guest')
+  try {
+    const hr = (await command(host, 'room.create', { name: '宿主的屋' })).rooms[0]
+    const gr = (await command(guest, 'room.create', { name: '我本地的屋' })).rooms[0]
+    await command(guest, 'member.createBot', { roomId: gr.id, name: '小七', role: '对账' })
+    const bot = (await snapshot(guest)).bots[0]
+    await command(guest, 'lan.join', { host: '127.0.0.1', port: (await snapshot(host)).lan.port, code: hr.code, machine: 'GUEST-RM' })
+
+    const mirror = await until(async () => (await snapshot(guest)).rooms.find((row) => row.remote), { label: '镜像房间出现', timeoutMs: 8000 })
+    const mine = mirror.members.find((member) => member.botId === bot.id)
+    assert.ok(mine, '镜像里应该有自己的 agent')
+
+    await command(guest, 'member.remove', { roomId: mirror.id, memberId: mine.id })
+    const hostRoom = (await snapshot(host)).rooms.find((row) => row.id === hr.id)
+    assert.equal(hostRoom.members.some((member) => member.name === '小七'), false, '宿主这间屋应该已经没有它')
+    // agent 本体还在，本机别的房间的成员也不动 —— 这正是「移出这间屋」和「删除 agent」的区别。
+    assert.ok((await snapshot(guest)).bots.some((row) => row.id === bot.id), 'agent 本体不能被删')
+    assert.ok(
+      (await snapshot(guest)).rooms.find((row) => row.id === gr.id).members.some((member) => member.botId === bot.id),
+      '本机其他房间的成员不能被牵连',
+    )
+
+    // 再加回这间屋：宿主那边重新出现。
+    await command(guest, 'member.addBot', { roomId: mirror.id, botId: bot.id })
+    await until(
+      async () => (await snapshot(host)).rooms.find((row) => row.id === hr.id).members.some((member) => member.name === '小七'),
+      { label: 'agent 被重新加回宿主房间', timeoutMs: 8000 },
+    )
+  } finally {
+    await guest.dispose().catch(() => {})
+    await host.dispose().catch(() => {})
+  }
+})
