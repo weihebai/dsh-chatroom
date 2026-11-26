@@ -743,3 +743,19 @@ test('重复提交同一条消息（同一个 opKey）只触发一次 agent 回�
     await dispose()
   }
 })
+
+test('失败的命令返回带 details 的错误信封（核心校验器要求）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'chatroom-'))
+  const { ctx, routes } = fakeCtx(dir)
+  const dispose = await apply(ctx)
+  try {
+    const res = await call(routes, 'command', { action: 'room.activate', input: { roomId: 'not-there' } })
+    assert.equal(res.ok, false)
+    assert.equal(typeof res.error.code, 'string')
+    assert.equal(typeof res.error.message, 'string')
+    assert.equal(typeof res.error.details, 'object')
+    assert.ok(res.error.details, 'details 必须是对象，否则核心会把整条失败改写成 invalid server-response failure')
+  } finally {
+    await dispose()
+  }
+})

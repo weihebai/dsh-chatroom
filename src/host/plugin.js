@@ -73,7 +73,9 @@ function publicError(error, signal) {
     : signal?.aborted
       ? 'cancelled'
       : 'internal_error'
-  return { code, message: error?.message ? String(error.message).slice(0, 400) : '操作未完成。' }
+  // details 不能省：核心的响应校验器要求错误里必须带一个 details 对象，
+  // 少了它整条失败会被改写成 connection: invalid server-response failure，真实原因就丢了。
+  return { code, message: error?.message ? String(error.message).slice(0, 400) : '操作未完成。', details: {} }
 }
 
 /** 从别的机器同步过来的房间：规则、成员、解散都得在那台机器上改。 */
@@ -253,7 +255,19 @@ export async function dispatch({ store, speaker, gate = null, lan = null, comman
       break
     }
     case 'session.switch': {
-      assertLocal(roomOf(input.roomId), '切换会话')
+      const target = roomOf(input.roomId)
+      if (!target) throw Object.assign(new Error('找不到这间屋子。'), { code: 'room_not_found' })
+      const targetRow = target.members.find((member) => member.id === input.memberId)
+      const targetBot = state.bots.find((item) => item.id === targetRow?.botId)
+      // 镜像房间的成员归宿主管，但「我这台机器带上去的 agent」的会话只存在本机，
+      // 换会话不碰宿主任何状态：允许在本机换，否则加入方永远换不了自己 agent 的会话。
+      const ownLocalBot = Boolean(targetRow && targetRow.origin?.kind === 'local' && targetBot)
+      if (target.remote && !ownLocalBot) {
+        throw Object.assign(
+          new Error(`这间屋子在 ${target.remote.machine || target.remote.host} 上，切换会话要在那台机器上做。`),
+          { code: 'remote_room' },
+        )
+      }
       let changed = false
       store.commit((draft) => {
         const room = getRoom(draft, input.roomId)

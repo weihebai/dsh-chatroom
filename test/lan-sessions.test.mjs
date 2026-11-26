@@ -163,3 +163,26 @@ test('LAN 房间绑定在快照刷新后仍生效，其他房间和默认会话�
     await host.dispose()
   }
 })
+
+test('加入方能在镜像房间给自己带上去的 agent 换新会话，宿主与默认会话都不受影响', async () => {
+  const host = await boot('ns-host', { reply: '宿主收到。' })
+  const guest = await boot('ns-guest', { reply: '好。' })
+  try {
+    const hr = (await command(host, 'room.create', { name: '换会话房' })).rooms[0]
+    const gr = (await command(guest, 'room.create', { name: '本地' })).rooms[0]
+    await command(guest, 'member.createBot', { roomId: gr.id, name: '小七', role: '对账' })
+    const defaultBot = (await snapshot(guest)).bots[0]
+    await command(guest, 'lan.join', { host: '127.0.0.1', port: (await snapshot(host)).lan.port, code: hr.code, machine: 'GUEST-NS' })
+    const mirror = await until(async () => (await snapshot(guest)).rooms.find((row) => row.remote), { label: '镜像房间出现', timeoutMs: 8000 })
+    const mine = mirror.members.find((member) => member.botId === defaultBot.id)
+    assert.ok(mine, '镜像里应该有自己的 agent')
+    await command(guest, 'session.switch', { roomId: mirror.id, memberId: mine.id, mode: 'new' })
+    const after = (await snapshot(guest)).rooms.find((row) => row.id === mirror.id).members.find((member) => member.id === mine.id)
+    assert.equal(after.sessionBound, true)
+    assert.ok(after.sessionId)
+    assert.equal((await snapshot(guest)).bots[0].sessionId, defaultBot.sessionId, 'agent 默认会话不能被改')
+  } finally {
+    await guest.dispose().catch(() => {})
+    await host.dispose().catch(() => {})
+  }
+})
