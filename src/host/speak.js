@@ -117,6 +117,13 @@ export function createSpeaker({ store, runner, dispatchRemote = null, gate = nul
    * 人发的消息永远清零；agent 用 room 工具发的话才累加。到顶就不再自动开新一轮 ——
    * 没有这道闸，两个 agent 可以互相「收到」「好的」一直转下去，每一圈都是一次真实模型调用。
    */
+  /**
+   * roomId → (messageId|memberId → 派发时间)。
+   * 同一条人消息对同一个 agent 只驱动一轮：重复提交、重试并发、LAN 重投递
+   * 都不该让同一个问题被答两遍。
+   */
+  const dispatched = new Map()
+  const DISPATCH_TTL = 60_000
   const autoRounds = new Map()
   /** roomId → 已经为这一串自动讨论发过「请房主拍板」的提醒（人一说话就清）。 */
   const escalated = new Set()
@@ -419,8 +426,18 @@ export function createSpeaker({ store, runner, dispatchRemote = null, gate = nul
       if (rules.roundRobin) for (const member of botsOf(room)) push(member)
     }
     if (!queue.length) return false
-    run(roomId, queue, {
-      kind: !directed && rules.chairId && queue[0]?.id === rules.chairId ? 'chair' : 'mention',
+    const now = Date.now()
+    const recent = dispatched.get(roomId) ?? new Map()
+    for (const [key, at] of recent) if (now - at > DISPATCH_TTL) recent.delete(key)
+    const fresh = queue.filter((member) => !recent.has(message.id + '|' + member.id))
+    if (!fresh.length) {
+      log('duplicate_dispatch_skipped', { roomId, messageId: message.id })
+      return false
+    }
+    for (const member of fresh) recent.set(message.id + '|' + member.id, now)
+    dispatched.set(roomId, recent)
+    run(roomId, fresh, {
+      kind: !directed && rules.chairId && fresh[0]?.id === rules.chairId ? 'chair' : 'mention',
       // 这条人消息是从哪台机器来的：别的机器来的话，本机 agent 的回合要先过授权门。
       trigger: triggerOf(message),
     })

@@ -154,3 +154,18 @@ test('单条消息上限真的执行：超长回复被截断，并提示下一�
   assert.ok(posted.text.length <= 120 + 20, '落库的消息不该超过上限')
   assert.match(posted.text, /已截断/)
 })
+
+test('同一条人消息重复进来，只驱动同一个 agent 一轮', async () => {
+  const state = emptyState()
+  const room = createRoom(state, { name: '去重' })
+  const store = fakeStore(state)
+  addBot(store, room, '后端', 'bot_dup')
+  updateRoom(state, { roomId: room.id, rules: { roundRobin: true } })
+  const called = []
+  const speaker = createSpeaker({ store, runner: { async say(bot) { called.push(bot.name); return { text: '收到' } } } })
+  const message = postMessage(state, { roomId: room.id, authorId: state.self.id, text: '在吗' })
+  speaker.afterHumanMessage({ roomId: room.id, messageId: message.id })
+  speaker.afterHumanMessage({ roomId: room.id, messageId: message.id })
+  await settle(store)
+  assert.deepEqual(called, ['后端'])
+})

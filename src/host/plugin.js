@@ -284,7 +284,9 @@ export async function dispatch({ store, speaker, gate = null, lan = null, comman
         break
       }
       let posted = null
+      let added = false
       store.commit((draft) => {
+        const before = getRoom(draft, input.roomId)?.messages.length ?? 0
         posted = postMessage(draft, {
           roomId: input.roomId,
           authorId: draft.self.id,
@@ -294,8 +296,10 @@ export async function dispatch({ store, speaker, gate = null, lan = null, comman
           origin: { kind: 'local' },
           opKey: input.opKey,
         })
+        // opKey 重复时 postMessage 返回已有的那条：不能再触发一轮，否则同一句话会被答两遍。
+        added = (getRoom(draft, input.roomId)?.messages.length ?? 0) > before
       })
-      if (posted) speaker.afterHumanMessage({ roomId: input.roomId, messageId: posted.id })
+      if (added && posted) speaker.afterHumanMessage({ roomId: input.roomId, messageId: posted.id })
       break
     }
     case 'msg.retry': {

@@ -721,3 +721,25 @@ test('停下之后马上接着说：旧回合的收尾不会把新的一轮也�
     await dispose()
   }
 })
+
+test('重复提交同一条消息（同一个 opKey）只触发一次 agent 回合', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'chatroom-dup-'))
+  const { ctx, routes, prompts } = fakeCtx(dir, { reply: '收到' })
+  const dispose = await apply(ctx)
+  try {
+    const created = await call(routes, 'command', { action: 'room.create', input: { name: '联调' } })
+    const roomId = created.value.rooms[0].id
+    await call(routes, 'command', { action: 'member.createBot', input: { roomId, name: '后端' } })
+    const payload = { action: 'msg.send', input: { roomId, text: '@后端 在吗', opKey: 'k_dup' } }
+    await call(routes, 'command', payload)
+    await tick(300)
+    await call(routes, 'command', payload)
+    await tick(400)
+    assert.equal(prompts.length, 1, `同一句话只能驱动一轮，实际 ${prompts.length}`)
+    const view = await call(routes, 'snapshot', {})
+    const bots = view.value.rooms[0].messages.filter((message) => message.authorKind === 'bot')
+    assert.equal(bots.length, 1)
+  } finally {
+    await dispose()
+  }
+})
