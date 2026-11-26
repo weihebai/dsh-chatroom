@@ -104,6 +104,23 @@ export function createBotRunner(ctx, { log = () => {} } = {}) {
     if (selection.model) agentOptions.model = selection.model
     if (Number.isSafeInteger(selection.maxTokens)) agentOptions.maxTokens = selection.maxTokens
     const meta = { cwd: bot.cwd || defaultCwd() }
+    // 只给 cwd 不够：工具（终端、文件、检索）和系统提示都在 agent preset 里，
+    // 不挂 preset 的会话能说话、但没有任何工具，就会回「没有可用的命令执行能力」。
+    let setup
+    const presets = ctx.get?.('agentPresets') ?? ctx.agentPresets
+    if (presets && typeof presets.resolve === 'function') {
+      try {
+        const resolved = await presets.resolve()
+        if (resolved?.id) {
+          meta.agentPreset = resolved.id
+          setup = async (agentCtx) => {
+            await presets.mount(agentCtx, resolved.id)
+          }
+        }
+      } catch (error) {
+        log('preset_resolve_failed', error)
+      }
+    }
     let agent
     try {
       const handle = await registry.resume({ resumeSessionId: bot.sessionId, agentOptions })
@@ -113,7 +130,7 @@ export function createBotRunner(ctx, { log = () => {} } = {}) {
       // 外部成员代表的是一个已存在的会话；找不到就不能凭空造一个同 id 的，
       // 那会变成两份记忆。让调用方看到明确的原因。
       if (bot.external === true) fail('session_unavailable', '这个成员对应的会话当前不在本机，无法发言。')
-      const handle = await registry.create({ sessionId: bot.sessionId, meta, agentOptions })
+      const handle = await registry.create({ sessionId: bot.sessionId, meta, agentOptions, setup })
       agent = handle.agent ?? handle
       await attachToWorkspace(bot.sessionId, meta.cwd)
     }

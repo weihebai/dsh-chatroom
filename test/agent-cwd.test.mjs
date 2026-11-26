@@ -142,3 +142,26 @@ test('面板换会话：session.switch 只切当前房间，可再切回来', as
     await side.dispose()
   }
 })
+
+test('新建会话会套用 agent preset（否则没有工具，只会说没有命令执行能力）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cwd-preset-'))
+  const mounted = []
+  const agentPresets = {
+    resolve: async () => ({ id: 'default' }),
+    mount: async (_agentCtx, id) => mounted.push(id),
+  }
+  const fake = fakeCtx(dir, { agentPresets })
+  const dispose = await apply(fake.ctx)
+  try {
+    const created = await call(fake.routes, 'command', { action: 'room.create', input: { name: '联调' } })
+    const roomId = created.value.rooms[0].id
+    await call(fake.routes, 'command', { action: 'member.createBot', input: { roomId, name: '后端', cwd: dir } })
+    await call(fake.routes, 'command', { action: 'msg.send', input: { roomId, text: '@后端 在吗' } })
+    await until(() => mounted.length > 0, { label: 'preset 已挂载' })
+    assert.deepEqual(mounted, ['default'])
+    assert.equal(fake.creates[0].meta.agentPreset, 'default')
+    assert.equal(fake.creates[0].meta.cwd, dir)
+  } finally {
+    await dispose()
+  }
+})

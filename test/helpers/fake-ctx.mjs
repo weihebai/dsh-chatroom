@@ -9,11 +9,12 @@
 
 const encoder = new TextEncoder()
 
-export function fakeCtx(dir, { reply, model = { provider: 'fake', model: 'fake-chat' }, workspaceRegistry } = {}) {
+export function fakeCtx(dir, { reply, model = { provider: 'fake', model: 'fake-chat' }, workspaceRegistry, agentPresets } = {}) {
   const routes = new Map()
   const agents = new Map()
   const events = new Map()
   const prompts = []
+  const creates = []
   const replyFor =
     typeof reply === 'function'
       ? reply
@@ -53,9 +54,11 @@ export function fakeCtx(dir, { reply, model = { provider: 'fake', model: 'fake-c
   const services = {
     agents: {
       get: (id) => agents.get(id),
-      create: async ({ sessionId }) => {
-        const agent = agentFor(sessionId)
-        agents.set(sessionId, agent)
+      create: async (input) => {
+        creates.push(input)
+        if (typeof input.setup === 'function') await input.setup({})
+        const agent = agentFor(input.sessionId)
+        agents.set(input.sessionId, agent)
         return { agent }
       },
       resume: async () => {
@@ -73,6 +76,7 @@ export function fakeCtx(dir, { reply, model = { provider: 'fake', model: 'fake-c
     agentDefaultModel: { currentSelection: () => model },
     workingDirectory: { defaultDirectory: dir },
     ...(workspaceRegistry ? { workspaceRegistry } : {}),
+    ...(agentPresets ? { agentPresets } : {}),
     connection: {
       fetch: {
         register(route) {
@@ -89,7 +93,7 @@ export function fakeCtx(dir, { reply, model = { provider: 'fake', model: 'fake-c
     effect: (fn) => fn(),
   }
   ctx.root = ctx
-  return { ctx, routes, promises: prompts, prompts, events }
+  return { ctx, routes, promises: prompts, prompts, events, creates }
 }
 
 export function request(payload, method = 'dsh.chatroom/command') {
