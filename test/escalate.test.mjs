@@ -188,5 +188,5 @@ test('提示词：远程派发按收件人视角标「本机」，并要求先�
   })
   assert.match(prompt, /远程agent（agent，前端，本机（你这台机器）/)
   assert.match(prompt, /本机agent（agent，宿主那台机器/)
-  assert.match(prompt, /执行请求/)
+  assert.match(prompt, /先动手|要处理的原文/)
 })

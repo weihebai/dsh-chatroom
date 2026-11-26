@@ -67,51 +67,36 @@ function buildPrompt({ room, bot, at, viewerPeer = null }) {
       return `- ${member.name}（${kind}${role}${where}）`
     })
     .join('\n')
-  // 展示时按 1..n 重新编号：被跳过的失败占位会让原序号出现空洞，读起来像丢了消息。
-  const transcript = transcriptOf(room, { limit: 24, maxChars: 320 })
+  // 只给最近几条，并逐条截断：提示词是干活用的，不是聊天记录备份。
+  const recent = transcriptOf(room, { limit: 8, maxChars: 200 })
     .split('\n')
     .map((line, index) => line.replace(/^#\d+/, '#' + (index + 1)))
     .join('\n')
   const mine = room.messages.filter((message) => message.authorId === bot.id && message.status !== 'error').at(-1)
-  // 被 @ 时点名「谁在等你」：不点名的话模型只能从一长串历史里自己猜该回哪句。
   const waiting = room.messages
     .filter((message) => (message.mentions ?? []).includes(bot.id) && message.status !== 'error')
     .at(-1)
   const overLimit = mine && mine.text.length > room.rules.maxChars
-  const rules = []
-  if (room.rules.mention) rules.push('被 @ 时回话')
-  if (room.rules.roundRobin) rules.push('轮到全员时各说一句')
-  if (room.rules.chairId) {
-    const chair = getMember(room, room.rules.chairId)
-    if (chair) rules.push(`主持人是 ${chair.name}`)
-  }
+  const ask = at === 'chair'
+    ? '你现在是主持人：一句话点明分歧，给出你的判断，需要谁补就 @ 谁。'
+    : at === 'round'
+      ? '就上面的话题补一句你的结论或反驳，不要复述别人。'
+      : (waiting ? '「' + waiting.authorName + '」等你处理（原文见下）。' : '有人等你回复。') +
+        '先动手：读代码/改文件/跑命令，做完再回一条结果。'
   return [
-    `你正在 DeepSeek Harness 的一间群聊房间里，以「${bot.name}」的身份参与对话。`,
-    bot.role ? `你的职责：${bot.role}` : '',
+    '你以「' + bot.name + '」的身份在群聊「' + room.name + '」里协作，目标是把两边的代码改完、功能跑通；你在这台机器上干活。',
+    bot.role ? '你的职责：' + bot.role.slice(0, 80) : '',
     '',
-    `房间：${room.name}${room.topic ? `\n主题：${room.topic}` : ''}`,
-    '成员：',
+    '成员（谁在哪台机器）：',
     memberLine,
     '',
-    rules.length ? `房间规则：${rules.join('；')}` : '',
+    '最近对话：',
+    recent || '（还没有人说话）',
     '',
-    '最近的对话（#序号 作者：内容）：',
-    transcript || '（还没有人说话）',
-    '',
-    at === 'chair'
-      ? '现在轮到你这个主持人发言：先把大家的分歧点出来，给出你的判断；需要谁补充，就在话里 @ 他的名字。'
-      : at === 'round'
-        ? '现在轮到你发言：就上面的话题说你自己的看法，可以顺着别人的话补充或反驳。'
-        : (waiting ? '「' + waiting.authorName + '」在等你回复他的这条消息' : '有人在等你回复') +
-          '：这是一条执行请求，先用工具实际做完（读代码、改文件、跑命令、查接口），再回复结果；' +
-          '不要只回「收到」「好的」。做完后 @ 回请求你的人，把结论和可核对的事实（命令输出、文件路径、接口字段）一起给出。',
-    overLimit
-      ? `你上一条发言 ${mine.text.length} 字，超过这间房 ${room.rules.maxChars} 字的上限；这一条务必先给结论、压到上限内。`
-      : '',
-    `要求：中文；先给结论——第一句话直接回答或表态，不要复述问题、不要先讲你查了什么、不要罗列过程；` +
-      `只从你的职责出发说你该说的那部分，不要替其他成员下结论；` +
-      `不超过 ${room.rules.maxChars} 字（硬限制，超出会被截断）；` +
-      `只输出这一条消息本身，不要前缀、不要解释、不要「作为 X」这类元信息。`,
+    ask,
+    waiting && at === 'mention' ? '要处理的原文：' + waiting.text.slice(0, 400) : '',
+    '回复要求：中文；第一句给结论或进展；写清改了什么、验证结果、下一步或卡点；不要寒暄、不要复述、不要只回「收到」；不超过 ' + room.rules.maxChars + ' 字；只输出这一条消息。',
+    overLimit ? '（你上一条超了 ' + room.rules.maxChars + ' 字上限，这条务必压缩。）' : '',
   ]
     .filter((line) => line !== '')
     .join('\n')
