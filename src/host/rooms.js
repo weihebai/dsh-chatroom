@@ -477,7 +477,7 @@ export function unreadOf(room, memberId) {
 }
 
 /** 给模型看的对话记录：跳过失败占位与房间外的东西。 */
-export function transcriptOf(room, { limit = 24, selfId = 'me' } = {}) {
+export function transcriptOf(room, { limit = 24, selfId = 'me', maxChars = 0 } = {}) {
   return room.messages
     // notice 是「这一轮没执行」的说明，不是谁说过的话：给模型看只会让它以为有人说过。
     .filter((message) => message.status !== 'error' && message.status !== 'notice')
@@ -491,7 +491,8 @@ export function transcriptOf(room, { limit = 24, selfId = 'me' } = {}) {
         : message.authorId === selfId
       const who = `${message.authorName}（${human ? '人' : 'agent'}）`
       const origin = message.origin?.kind === 'lan' ? '〔远程〕' : ''
-      return `#${message.seq} ${origin}${who}：${message.text}`
+      const body = maxChars > 0 && message.text.length > maxChars ? message.text.slice(0, maxChars) + '…' : message.text
+      return `#${message.seq} ${origin}${who}：${body}`
     })
     .join('\n')
 }
