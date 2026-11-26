@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { promptFromFacts } from './speak.js'
 import { hostname } from 'node:os'
 import { BUILD, baseUrl, fail, getJson, parseTarget, postJson } from './lan.js'
 import { isWhaleColor } from './palette.js'
@@ -517,7 +518,10 @@ export function createLanGuest({ store, runner, gate = null, log = () => {} } = 
       const room = store.state.rooms.find((row) => row.id === record.localRoomId)
       const bound = room?.members.find((member) => member.botId === assignment.agentId && member.origin?.kind === 'local' && member.sessionBound === true)
       const sessionBot = bound ? { ...bot, sessionId: bound.sessionId, external: bound.external === true } : bot
-      const { text } = await runner.say({ ...sessionBot, cwd: bot.cwd ?? undefined }, assignment.prompt, {
+      // 提示词在本机拼：成员「本机/宿主」按这台机器算，不依赖宿主视角；
+      // 旧宿主没有 facts 时退回它给的整段 prompt。
+      const prompt = assignment.facts ? promptFromFacts(assignment.facts, { selfKey: record.peerId }) : assignment.prompt
+      const { text } = await runner.say({ ...sessionBot, cwd: bot.cwd ?? undefined }, prompt, {
         waitIdleFirst: sessionBot.external === true,
       })
       await send({ text })

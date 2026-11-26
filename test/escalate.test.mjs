@@ -204,3 +204,21 @@ test('提示词只带自己上次发言之后的记录，不带整间房的历�
   assert.match(prompt, /交给你的新任务/)
   assert.doesNotMatch(prompt, /很早以前的一句话/)
 })
+
+test('派发只传事实，由执行方自己拼提示词（加入方视角正确）', () => {
+  const state = emptyState()
+  const room = createRoom(state, { name: '事实' })
+  const store = fakeStore(state)
+  addBot(store, room, '宿主agent', 'b_host')
+  addMember(state, {
+    roomId: room.id,
+    member: { id: 'm_peer', kind: 'bot', name: '对方agent', role: '前端', botId: 'b_peer', origin: { kind: 'lan', peer: 'peer-1', machine: 'hm' } },
+  })
+  const speaker = createSpeaker({ store, runner: { async say() { return { text: '' } } } })
+  const facts = speaker.buildFacts({ room: state.rooms[0], bot: { id: 'm_peer', name: '对方agent', role: '前端' }, at: 'mention' })
+  const own = speaker.promptFromFacts(facts, { selfKey: 'peer-1' })
+  assert.match(own, /对方agent（agent，前端，本机（你这台机器）/)
+  assert.match(own, /宿主agent（agent，宿主那台机器/)
+  const hostView = speaker.promptFromFacts(facts, { selfKey: 'host' })
+  assert.match(hostView, /宿主agent（agent，本机/)
+})

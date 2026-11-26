@@ -48,31 +48,11 @@ function withAbort(promise, signal) {
   return Promise.race([promise, aborted])
 }
 
-function buildPrompt({ room, bot, at, viewerPeer = null }) {
-  const memberLine = room.members
-    .map((member) => {
-      const kind = member.kind === 'human' ? '人' : 'agent'
-      // 说「从哪台机器来」而不是那条连接的 peer 地址：peer 是进程现发的（重启就变），
-      // 机器名才是这个模型能记住、人能对上号的东西。
-      // 远程派发时提示词由宿主拼、在对方机器上执行：「本机」要按收件人那台机器算，否则加入方会看到反过来的主谓。
-      const mine = viewerPeer !== null && member.origin?.kind === 'lan' && member.origin.peer === viewerPeer
-      const where = mine
-        ? '，本机（你这台机器）'
-        : viewerPeer !== null && member.origin?.kind !== 'lan'
-          ? '，宿主那台机器'
-          : member.origin?.kind === 'lan'
-            ? `，从 LAN 进来（${member.origin.machine || member.origin.peer || '远程'}）`
-            : '，本机'
-      const role = member.role ? '，' + member.role.slice(0, 40) + (member.role.length > 40 ? '…' : '') : ''
-      return `- ${member.name}（${kind}${role}${where}）`
-    })
-    .join('\n')
-  // 只给「你上次发言之后」的消息，最多 6 条：交接要的是当前这件事的上下文，
-  // 不是整个房间的聊天记录。没有比自己更早的发言时退回最近 6 条。
+export function promptFactsFor({ room, bot, at }) {
   const visible = room.messages.filter((message) => message.status !== 'error' && message.status !== 'notice')
   const mineAt = visible.map((message) => message.authorId).lastIndexOf(bot.id)
   const tail = visible.slice(Math.max(0, mineAt + 1)).slice(-6)
-  const recent = tail
+  const transcript = tail
     .map((message, index) => {
       const human = message.authorKind === 'human'
       const body = message.text.length > 200 ? message.text.slice(0, 200) + '…' : message.text
@@ -80,34 +60,71 @@ function buildPrompt({ room, bot, at, viewerPeer = null }) {
       return '#' + (index + 1) + ' ' + origin + message.authorName + '（' + (human ? '人' : 'agent') + '）：' + body
     })
     .join('\n')
-  const mine = room.messages.filter((message) => message.authorId === bot.id && message.status !== 'error').at(-1)
-  const waiting = room.messages
-    .filter((message) => (message.mentions ?? []).includes(bot.id) && message.status !== 'error')
-    .at(-1)
-  const overLimit = mine && mine.text.length > room.rules.maxChars
-  const ask = at === 'chair'
+  const mine = visible.filter((message) => message.authorId === bot.id).at(-1)
+  const waiting = visible.filter((message) => (message.mentions ?? []).includes(bot.id)).at(-1)
+  return {
+    botName: bot.name,
+    role: bot.role ? String(bot.role).slice(0, 80) : '',
+    roomName: room.name,
+    topic: room.topic || '',
+    maxChars: room.rules.maxChars,
+    at,
+    overLimit: Boolean(mine && mine.text.length > room.rules.maxChars),
+    waiting: waiting ? { authorName: waiting.authorName, text: waiting.text.slice(0, 400) } : null,
+    members: room.members.map((member) => ({
+      name: member.name,
+      kind: member.kind === 'human' ? 'human' : 'agent',
+      role: member.role ? String(member.role).slice(0, 40) : '',
+      machineKey: member.origin?.kind === 'lan' ? member.origin.peer || 'remote' : 'host',
+      machine: member.origin?.kind === 'lan' ? member.origin.machine || member.origin.peer || '远程' : '',
+    })),
+    transcript,
+  }
+}
+
+export function promptFromFacts(facts, { selfKey = 'host' } = {}) {
+  const memberLine = facts.members
+    .map((member) => {
+      const kind = member.kind === 'human' ? '人' : 'agent'
+      const self = member.machineKey === selfKey
+      const where = self
+        ? (selfKey === 'host' ? '，本机' : '，本机（你这台机器）')
+        : member.machineKey === 'host'
+          ? '，宿主那台机器'
+          : '，从 LAN 进来（' + (member.machine || '远程') + '）'
+      const role = member.role ? '，' + member.role : ''
+      return '- ' + member.name + '（' + kind + role + where + '）'
+    })
+    .join('\n')
+  const ask = facts.at === 'chair'
     ? '你现在是主持人：一句话点明分歧，给出你的判断，需要谁补就 @ 谁。'
-    : at === 'round'
+    : facts.at === 'round'
       ? '就上面的话题补一句你的结论或反驳，不要复述别人。'
-      : (waiting ? '「' + waiting.authorName + '」等你处理（原文见下）。' : '有人等你回复。') +
-        '先动手：读代码/改文件/跑命令，做完再回一条结果。'
+      : (facts.waiting ? '「' + facts.waiting.authorName + '」等你处理（原文见下）。' : '有人等你回复。') + '先动手：读代码/改文件/跑命令，做完再回一条结果。'
   return [
-    '你以「' + bot.name + '」的身份在群聊「' + room.name + '」里协作，目标是把两边的代码改完、功能跑通；你在这台机器上干活。',
-    bot.role ? '你的职责：' + bot.role.slice(0, 80) : '',
+    '你以「' + facts.botName + '」的身份在群聊「' + facts.roomName + '」里协作，目标是把两边的代码改完、功能跑通；你在这台机器上干活。',
+    facts.role ? '你的职责：' + facts.role : '',
     '',
     '成员（谁在哪台机器）：',
     memberLine,
     '',
     '最近对话：',
-    recent || '（还没有人说话）',
+    facts.transcript || '（还没有人说话）',
     '',
     ask,
-    waiting && at === 'mention' ? '要处理的原文：' + waiting.text.slice(0, 400) : '',
-    '回复要求：中文；第一句给结论或进展；写清改了什么、验证结果、下一步或卡点；不要寒暄、不要复述、不要只回「收到」；不超过 ' + room.rules.maxChars + ' 字；只输出这一条消息。',
-    overLimit ? '（你上一条超了 ' + room.rules.maxChars + ' 字上限，这条务必压缩。）' : '',
+    facts.waiting && facts.at === 'mention' ? '要处理的原文：' + facts.waiting.text : '',
+    '回复要求：中文；第一句给结论或进展；写清改了什么、验证结果、下一步或卡点；不要寒暄、不要复述、不要只回「收到」；不超过 ' + facts.maxChars + ' 字；只输出这一条消息。',
+    facts.overLimit ? '（你上一条超了 ' + facts.maxChars + ' 字上限，这条务必压缩。）' : '',
   ]
     .filter((line) => line !== '')
     .join('\n')
+}
+
+function buildPrompt({ room, bot, at, viewerPeer = null }) {
+  const facts = promptFactsFor({ room, bot, at })
+  if (!viewerPeer) return promptFromFacts(facts, { selfKey: 'host' })
+  // 兼容旧版加入方：它们没有 facts，只能收整段文本，按收件人视角渲染。
+  return promptFromFacts(facts, { selfKey: viewerPeer })
 }
 
 export function createSpeaker({ store, runner, dispatchRemote = null, gate = null, log = () => {} }) {
@@ -257,6 +274,7 @@ export function createSpeaker({ store, runner, dispatchRemote = null, gate = nul
     try {
       const roomNow = roomOrFail(roomId)
       const prompt = buildPrompt({ room: roomNow, bot, at, viewerPeer: remote ? bot.origin?.peer ?? null : null })
+      const facts = promptFactsFor({ room: roomNow, bot, at })
       // 本机授权：这句话是别的机器上的人/agent 引出来的，那就先问本机的人。
       // 本机的人自己 @、自己点重试、自己点全员轮次都不问 —— 否则每句都要点一次。
       if (!remote && gate && trigger?.kind === 'lan') {
@@ -288,7 +306,7 @@ export function createSpeaker({ store, runner, dispatchRemote = null, gate = nul
           fail('lan_unavailable', '这台机器没有连上局域网，无法请远程 agent 发言。')
         }
         const result = await withAbort(
-          dispatchRemote({ roomId, member: bot, prompt, from: trigger, signal: controller.signal }),
+          dispatchRemote({ roomId, member: bot, prompt, facts, from: trigger, signal: controller.signal }),
           controller.signal,
         )
         text = result?.text
@@ -578,5 +596,9 @@ export function createSpeaker({ store, runner, dispatchRemote = null, gate = nul
     stop(roomId)
   }
 
-  return { afterHumanMessage, runRound, retryBot, stop, buildPrompt, forget, beginStream, pushStream, endStream }
+  return {
+    afterHumanMessage, runRound, retryBot, stop, buildPrompt, forget, beginStream, pushStream, endStream,
+    buildFacts: (args) => promptFactsFor(args),
+    promptFromFacts,
+  }
 }

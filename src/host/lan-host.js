@@ -594,7 +594,7 @@ export function createLanHost({ store, onHumanMessage = () => {}, log = logDefau
    * 把一个 agent 回合派发给它所在的机器。
    * 45s 没回音就落一条失败占位（speak.js 负责写），不让整轮卡死。
    */
-  function enqueue({ roomId, member, prompt, from = null }) {
+  function enqueue({ roomId, member, prompt, facts = null, from = null }) {
     if (!member?.owner || member.owner === 'local') {
       return Promise.reject(Object.assign(new Error('not_remote'), { code: 'not_remote' }))
     }
@@ -612,6 +612,7 @@ export function createLanHost({ store, onHumanMessage = () => {}, log = logDefau
         agentId: member.botId,
         memberName: member.name,
         prompt,
+      facts,
         // 引发出这一轮的是谁：对面机器要在授权窗口里说清「谁要它做什么」。
         // 本机的人引出来的（from.machine 为空）就填本机名 —— 对那台机器来说，
         // 请求确实来自这台机器。
@@ -650,6 +651,7 @@ export function createLanHost({ store, onHumanMessage = () => {}, log = logDefau
           agentId: row.agentId,
           memberName: row.memberName,
           prompt: row.prompt,
+        facts: row.facts ?? null,
           from: row.from,
         }
       }
