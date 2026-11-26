@@ -331,7 +331,7 @@ test('三条规则同时开：主持人 @ 的人不会被再调度一次，全�
     assert.equal(updated.value.rooms[0].rules.mention, true)
     assert.equal(updated.value.rooms[0].rules.chairId, chair.id)
 
-    await call(routes, 'command', { action: 'msg.send', input: { roomId, text: '@C 你先出个意见' } })
+    await call(routes, 'command', { action: 'msg.send', input: { roomId, text: '请主持人组织大家各说一句' } })
     await tick(400)
 
     const after = await call(routes, 'snapshot', {})
@@ -384,9 +384,9 @@ test('正在发言时人又说了一句：这句不会被吞掉，等这一轮�
     await tick(600)
 
     const after = await call(routes, 'snapshot', {})
-    // 第一轮是 A、B 各一句；插话进来后按同一套规则再来一轮（@ 的 B 在前，全员轮到的 A 在后）。
-    assert.equal(prompts.length, 4, `插话应该再引出两轮发言，实际总共 ${prompts.length} 次驱动`)
-    assert.deepEqual(prompts.map((prompt) => speakerOf(prompt.text)), ['A', 'B', 'B', 'A'])
+    // 第一轮是 A、B 各一句；插话明确点名 B，只再叫 B。
+    assert.equal(prompts.length, 3, '点名插话只再驱动 B，不追加全员')
+    assert.deepEqual(prompts.map((prompt) => speakerOf(prompt.text)), ['A', 'B', 'B'])
     assert.match(prompts[2].text, /@B 你等会儿单独说一句/, '接上的那一轮要带上插话本身')
 
     const replied = after.value.rooms[0].messages.filter(

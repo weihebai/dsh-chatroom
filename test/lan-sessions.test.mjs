@@ -28,12 +28,14 @@ async function boot(name, options = {}) {
   // 默认档位是只读，那道门单独在 test/auth-gate.test.mjs 里测。
   const { auth = 'full', ...rest } = options
   const fake = fakeCtx(dir, rest)
+  const registered = new Map()
+  fake.ctx.inject = (_keys, callback) => callback({ get: () => ({ register(definition) { registered.set(definition.name, definition); return () => registered.delete(definition.name) } }) })
   const dispose = await apply(fake.ctx)
   if (auth) {
     const granted = await call(fake.routes, 'command', { action: 'auth.set', input: { level: auth } })
     if (!granted.ok) throw new Error(`设置本机授权失败：${JSON.stringify(granted.error)}`)
   }
-  return { dir, dispose, ...fake }
+  return { dir, dispose, registered, ...fake }
 }
 
 const snapshot = async (side) => {
@@ -130,5 +132,34 @@ test('一台机器带两个 agent：各有各的原生会话，提示不串、�
   } finally {
     await guest.dispose().catch(() => {})
     await host.dispose().catch(() => {})
+  }
+})
+
+test('LAN 房间绑定在快照刷新后仍生效，其他房间和默认会话保持原样', async () => {
+  const host = await boot('bound-host')
+  const guest = await boot('bound-guest')
+  try {
+    const hr = (await command(host, 'room.create', { name: '远程项目' })).rooms[0]
+    const gr = (await command(guest, 'room.create', { name: '本地项目' })).rooms[0]
+    await command(guest, 'member.createBot', { roomId: gr.id, name: '对接员' })
+    const defaultBot = (await snapshot(guest)).bots[0]
+    const live = await guest.ctx.get('agents').create({ sessionId: 'bound-lan-session' })
+    assert.ok(live.agent)
+    await command(guest, 'lan.join', { host: '127.0.0.1', port: (await snapshot(host)).lan.port, code: hr.code })
+    const tool = guest.registered.get('chatroom')
+    await tool.execute({ action: 'notify', room: '远程项目', as: '对接员', text: '绑定测试' }, { agent: { id: 'bound-lan-session' } })
+    const localAfter = (await snapshot(guest)).rooms.find((row) => row.id === gr.id)
+    assert.equal(localAfter.members.find((m) => m.botId === defaultBot.id).sessionId, defaultBot.sessionId)
+    assert.equal((await snapshot(guest)).bots[0].sessionId, defaultBot.sessionId)
+    await command(host, 'msg.send', { roomId: hr.id, text: '@对接员 请回答' })
+    await until(() => guest.prompts.find((p) => p.sessionId === 'bound-lan-session'), { label: '按镜像房间绑定派发', timeoutMs: 8000 })
+    const mirror = (await snapshot(guest)).rooms.find((row) => row.remote)
+    const bound = mirror.members.find((m) => m.botId === defaultBot.id)
+    assert.equal(bound.sessionId, 'bound-lan-session')
+    assert.equal(bound.sessionBound, true)
+    assert.equal((await snapshot(guest)).bots[0].sessionId, defaultBot.sessionId)
+  } finally {
+    await guest.dispose()
+    await host.dispose()
   }
 })

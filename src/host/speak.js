@@ -59,7 +59,13 @@ function buildPrompt({ room, bot, at }) {
       return `- ${member.name}（${kind}${role}${where}）`
     })
     .join('\n')
+  // 展示时按 1..n 重新编号：被跳过的失败占位会让原序号出现空洞，读起来像丢了消息。
   const transcript = transcriptOf(room, { limit: 24 })
+    .split('\n')
+    .map((line, index) => line.replace(/^#\d+/, '#' + (index + 1)))
+    .join('\n')
+  const mine = room.messages.filter((message) => message.authorId === bot.id && message.status !== 'error').at(-1)
+  const overLimit = mine && mine.text.length > room.rules.maxChars
   const rules = []
   if (room.rules.mention) rules.push('被 @ 时回话')
   if (room.rules.roundRobin) rules.push('轮到全员时各说一句')
@@ -85,7 +91,13 @@ function buildPrompt({ room, bot, at }) {
       : at === 'round'
         ? '现在轮到你发言：就上面的话题说你自己的看法，可以顺着别人的话补充或反驳。'
         : '现在轮到你了：回应上面提到你或与你有关的内容。',
-    `要求：中文；不超过 ${room.rules.maxChars} 字；只从你的职责出发说你该说的那部分，不要替别的成员下结论；只输出你要说的那段话本身，不要前缀、不要解释、不要「作为 X」这类元信息。`,
+    overLimit
+      ? `你上一条发言 ${mine.text.length} 字，超过这间房 ${room.rules.maxChars} 字的上限；这一条务必先给结论、压到上限内。`
+      : '',
+    `要求：中文；先给结论——第一句话直接回答或表态，不要复述问题、不要先讲你查了什么、不要罗列过程；` +
+      `只从你的职责出发说你该说的那部分，不要替其他成员下结论；` +
+      `不超过 ${room.rules.maxChars} 字（硬限制，超出会被截断）；` +
+      `只输出这一条消息本身，不要前缀、不要解释、不要「作为 X」这类元信息。`,
   ]
     .filter((line) => line !== '')
     .join('\n')
@@ -211,17 +223,17 @@ export function createSpeaker({ store, runner, dispatchRemote = null, gate = nul
     // 本机只负责「这一轮轮到你了」把 prompt 派过去。
     const remote = isRemoteMember(bot)
     const directoryBot = remote ? null : store.inspect((state) => state.bots.find((row) => row.id === bot.botId))
-    // 外部成员有两副样子：本机房间里是一条只带 sessionId 的成员行（没有目录行）；
-    // 局域网房间里是报给宿主的一个 agent，本机 state.bots 里有目录行但 external=true。
-    // 两种都代表「用户正在用的那个会话」，都必须先等空闲再递话。
-    const external = !remote && (isExternalMember(bot) || directoryBot?.external === true)
-    if (!remote && !external && !directoryBot) {
+    // 房间绑定优先；未绑定时保留 agent 默认会话与旧版 external 路由。
+    const roomBound = bot.sessionBound === true || isExternalMember(bot)
+    const speakerBot = roomBound
+      ? { ...directoryBot, id: directoryBot?.id ?? bot.id, sessionId: bot.sessionId, external: bot.external === true }
+      : directoryBot
+    const external = !remote && speakerBot?.external === true
+    if (!remote && !speakerBot) {
       log('bot_missing', botId)
       return
     }
-    // 本机驱动时才需要盯它的增量（远程 agent 的增量在对面机器上，拿不到）。
-    const speakerBot = external ? (directoryBot?.external === true ? directoryBot : bot) : directoryBot
-    const driveSession = !remote && speakerBot ? speakerBot.sessionId : null
+    const driveSession = !remote ? speakerBot?.sessionId : null
     spoke.add(botId)
     budget.left -= 1
     setActivity(roomId, { speaking: [...(store.inspect((state) => getRoom(state, roomId)?.activity?.speaking) ?? []), bot.name] })
@@ -275,7 +287,7 @@ export function createSpeaker({ store, runner, dispatchRemote = null, gate = nul
           )
         ).text
       } else {
-        text = (await runner.say({ ...directoryBot, cwd: directoryBot.cwd ?? undefined }, prompt, { signal: controller.signal })).text
+        text = (await runner.say({ ...speakerBot, cwd: speakerBot.cwd ?? undefined }, prompt, { signal: controller.signal })).text
       }
       complete(roomId, directoryBot, botId, text)
       const fresh = roomOrFail(roomId)
@@ -336,7 +348,11 @@ export function createSpeaker({ store, runner, dispatchRemote = null, gate = nul
         if (state.bots.includes(directoryBot)) directoryBot.lastError = null
       }
       // 不传 origin：postMessage 会用发言人自己的 origin，远程 agent 的话不会被标成本机。
-      postMessage(state, { roomId, authorId: memberId, text })
+      // maxChars 是房间规则，必须真的执行：只写在提示词里，模型会一路写到几千字。
+      const max = room.rules.maxChars || 1200
+      const raw = String(text ?? '').trim()
+      const body = raw.length > max ? raw.slice(0, max) + ' …（超出 ' + max + ' 字上限，已截断）' : raw
+      postMessage(state, { roomId, authorId: memberId, text: body })
     })
   }
 
@@ -394,12 +410,17 @@ export function createSpeaker({ store, runner, dispatchRemote = null, gate = nul
     const push = (member) => {
       if (member && member.kind === 'bot' && !queue.some((row) => row.id === member.id)) queue.push(member)
     }
-    if (rules.chairId) push(getMember(room, rules.chairId))
-    if (rules.mention) for (const member of mentionedBots(room, message)) push(member)
-    if (rules.roundRobin) for (const member of botsOf(room)) push(member)
+    const directed = message.mentions.length > 0
+    if (directed) {
+      // 明确点名时只叫被点名的人；主持人和全员规则不额外插入成员。
+      if (rules.mention) for (const member of mentionedBots(room, message)) push(member)
+    } else {
+      if (rules.chairId) push(getMember(room, rules.chairId))
+      if (rules.roundRobin) for (const member of botsOf(room)) push(member)
+    }
     if (!queue.length) return false
     run(roomId, queue, {
-      kind: rules.chairId && queue[0]?.id === rules.chairId ? 'chair' : 'mention',
+      kind: !directed && rules.chairId && queue[0]?.id === rules.chairId ? 'chair' : 'mention',
       // 这条人消息是从哪台机器来的：别的机器来的话，本机 agent 的回合要先过授权门。
       trigger: triggerOf(message),
     })

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { clearMessages, postMessage, removeMember } from './rooms.js'
+import { clearMessages, postMessage, removeMember, rotateSession } from './rooms.js'
 import { pageMessages } from './project.js'
 
 /**
@@ -38,7 +38,7 @@ const TOOL_PARAMETERS = {
     text: { type: 'string', description: '消息正文。send / notify 必填。' },
     limit: { type: 'integer', description: 'read 返回多少条，默认 20，最多 200。' },
     beforeSeq: { type: 'integer', description: 'read 用：从这一条（不含）往前翻，取更早的一页。返回里会告诉你还有没有更早的。' },
-    mode: { type: 'string', enum: ['new', 'continue'], description: 'session 用：new 给这个 agent 开一个新会话（旧上下文不再带进来）；continue 回到上一个会话继续。' },
+    mode: { type: 'string', enum: ['new', 'continue', 'status', 'unbind'], description: '仅作用于所选房间：new 开新会话，continue 回上一个会话，status 查看绑定，unbind 解除绑定改用 agent 默认会话；其他房间不变。' },
     timeoutSec: { type: 'integer', description: 'ask 用：可选。给了就等它回这么久（1..180 秒）；不给就发完立即返回、不等（整轮可能要几分钟，用 read 查结果更稳）。' },
   },
   required: ['action'],
@@ -61,10 +61,11 @@ function whereOf(member) {
 }
 
 function memberLine(member, sessionId) {
-  const kind = member.kind === 'human' ? '人' : member.external === true ? 'agent·会话登记' : 'agent'
+  const kind = member.kind === 'human' ? '人' : member.external === true && !member.botId ? 'agent·会话登记' : 'agent'
   const role = member.role ? '，' + member.role : ''
-  const self = member.sessionId && member.sessionId === sessionId ? ' ← 你' : ''
-  return '- ' + member.name + '（' + kind + role + '，' + whereOf(member) + '）' + self
+  const self = member.sessionId && member.sessionId === sessionId ? ' ← 你当前会话' : ''
+  const bound = member.sessionBound === true ? ' · 本房间会话=' + member.sessionId : ''
+  return '- ' + member.name + '（' + kind + role + '，' + whereOf(member) + '）' + bound + self
 }
 
 function resolveRoom(state, key) {
@@ -87,7 +88,7 @@ function resolveRoom(state, key) {
 function localAgentsOf(room) {
   return room.members.filter((member) => {
     if (member.kind !== 'bot') return false
-    if (member.external === true) return false
+    if (member.external === true && !member.botId) return false
     return (member.origin && member.origin.kind === 'lan') !== true
   })
 }
@@ -125,22 +126,24 @@ function withMentions(text, names) {
  *
  * 为什么需要：一只 agent 早先被驱动过一次，就已经有了自己的会话；之后房间再 @ 它，
  * 默认会 resume 那个旧会话 —— 而那个会话的工作目录、上下文都不是你现在用的项目，
- * 讨论自然对不上。绑定把它的 sessionId 换成当前会话，并标记为 external，
+ * 讨论自然对不上。绑定只更新当前房间的成员会话，不改 agent 默认会话或其他房间，
  * 于是 speak/turn 走「先等空闲再递话」那条路，@ 回来直接落在你现在这个会话里。
  */
-function bindSpeaker(store, member, sessionId) {
-  if (!member || !member.botId || !sessionId) return
+function bindSpeaker(store, room, member, sessionId) {
+  if (!room || !member || !member.botId || !sessionId) return
   store.commit((draft) => {
-    const bot = draft.bots.find((row) => row.id === member.botId)
-    if (!bot) return
-    bot.sessionId = sessionId
-    bot.external = true
-    bot.lastSpokeAt = null
-    for (const room of draft.rooms) {
-      for (const row of room.members) {
-        if (row.botId === bot.id) row.sessionId = sessionId
-      }
+    const row = draft.rooms.find((item) => item.id === room.id)?.members.find((item) => item.id === member.id)
+    if (!row) return
+    // 绑定只属于这个房间，不改共享 agent 的默认会话。
+    if (row.sessionId !== sessionId) {
+      row.previousSessionId = row.sessionId ?? null
+      row.previousExternal = row.external === true
+      row.previousSessionBound = row.sessionBound === true
     }
+    row.sessionId = sessionId
+    row.sessionBound = true
+    row.external = true
+    row.lastSpokeAt = null
   })
 }
 
@@ -216,7 +219,7 @@ export function createChatroomTool(runtime, { log = () => {} } = {}) {
       const targets = []
       for (const row of state.rooms) {
         for (const member of row.members) {
-          if (member.external === true && sessionId && member.sessionId === sessionId) {
+          if (member.external === true && !member.botId && sessionId && member.sessionId === sessionId) {
             targets.push({ roomId: row.id, memberId: member.id, roomName: row.name })
           }
         }
@@ -240,40 +243,29 @@ export function createChatroomTool(runtime, { log = () => {} } = {}) {
       const bot = store.state.bots.find((row) => row.id === member.botId)
       if (!bot) fail('bot_not_found', '这个成员没有对应的 agent，无法切会话。')
       const mode = String(input.mode ?? 'new').trim()
-      if (mode === 'new') {
-        store.commit((draft) => {
-          const row = draft.bots.find((item) => item.id === bot.id)
-          if (!row) return
-          row.prevSessionId = row.sessionId ?? null
-          row.prevExternal = row.external === true
-          row.sessionId = randomUUID()
-          row.external = false
-          row.lastSpokeAt = null
-          for (const r of draft.rooms) {
-            for (const m of r.members) if (m.botId === row.id) m.sessionId = row.sessionId
-          }
-        })
-        return { message: '已让「' + member.name + '」开了一个新会话：之后房间跟它的讨论从零开始（工作目录不变）。' }
+      if (!['new', 'continue', 'status', 'unbind'].includes(mode)) {
+        fail('bad_session_mode', 'session 的 mode 只能是 new、continue、status 或 unbind。')
       }
-      if (mode === 'continue') {
-        const prev = bot.prevSessionId
-        if (!prev) fail('no_previous_session', '「' + member.name + '」没有上一个会话可以回。')
-        store.commit((draft) => {
-          const row = draft.bots.find((item) => item.id === bot.id)
-          if (!row) return
-          const current = row.sessionId
-          row.sessionId = prev
-          row.external = row.prevExternal === true
-          row.prevSessionId = current
-          row.prevExternal = false
-          row.lastSpokeAt = null
-          for (const r of draft.rooms) {
-            for (const m of r.members) if (m.botId === row.id) m.sessionId = row.sessionId
-          }
-        })
-        return { message: '已让「' + member.name + '」回到上一个会话继续。' }
+      if (mode === 'status') {
+        return {
+          message:
+            '「' + room.name + '」的「' + member.name + '」' +
+            (member.sessionBound ? '已绑定房间会话：' + member.sessionId : '使用 agent 默认会话：' + bot.sessionId),
+        }
       }
-      fail('bad_session_mode', 'session 的 mode 只能是 new 或 continue。')
+      let changed = false
+      store.commit((draft) => {
+        const row = draft.rooms.find((item) => item.id === room.id)?.members.find((item) => item.id === member.id)
+        const live = draft.bots.find((item) => item.id === member.botId)
+        changed = rotateSession(row, live, mode)
+      })
+      if (!changed) fail('no_previous_session', '「' + member.name + '」在「' + room.name + '」没有上一个会话可以回。')
+      const said = {
+        new: '已让「' + member.name + '」在「' + room.name + '」开了一个新会话：只影响这个房间，其他房间不变。',
+        continue: '已让「' + member.name + '」在「' + room.name + '」回到上一个会话继续；其他房间不受影响。',
+        unbind: '已解除「' + room.name + '」中「' + member.name + '」的会话绑定；改用 agent 默认会话，其他房间不变。',
+      }
+      return { message: said[mode] }
     }
 
     if (action === 'ask') {
@@ -284,10 +276,12 @@ export function createChatroomTool(runtime, { log = () => {} } = {}) {
       if (!target) fail('member_not_found', '这间屋里没有叫「' + targetName + '」的成员。')
       // 不能问一个绑在自己身上的会话：那等于等自己，永远等不到。
       const targetBot = target.botId ? store.state.bots.find((row) => row.id === target.botId) : null
-      if (targetBot && targetBot.sessionId === sessionId) {
+      const targetSessionId = target.sessionBound ? target.sessionId : targetBot?.sessionId
+      if (targetSessionId && targetSessionId === sessionId && (!target.origin || target.origin.kind !== 'lan')) {
         fail('self_target', '「' + target.name + '」就是当前会话自己绑定的身份，不能 @ 自己等回复。')
       }
       const speaker = pickSpeaker(room, input.as)
+      if (input.bind !== false) bindSpeaker(store, room, speaker, sessionId)
       if (target.id === speaker.id) fail('self_target', '你要 @ 的就是你自己的身份（' + speaker.name + '），换个成员再问。')
       // 不给 timeoutSec 就发完即回（整轮可能要几分钟，别把会话卡死）。
       const waitMs = input.timeoutSec === undefined ? 0 : askTimeout(input.timeoutSec)
@@ -338,7 +332,7 @@ export function createChatroomTool(runtime, { log = () => {} } = {}) {
     if (action === 'notify') {
       if (!body) fail('message_empty', 'notify 需要 text。')
       const speaker = pickSpeaker(room, input.as)
-      if (input.bind !== false) bindSpeaker(store, speaker, sessionId)
+      if (input.bind !== false) bindSpeaker(store, room, speaker, sessionId)
       if (room.remote) {
         const lan = lanOf(runtime)
         await lan.announceAgents?.()
@@ -354,7 +348,7 @@ export function createChatroomTool(runtime, { log = () => {} } = {}) {
     if (action === 'send') {
       if (!body) fail('message_empty', 'send 需要 text。')
       const speaker = pickSpeaker(room, input.as)
-      if (input.bind !== false) bindSpeaker(store, speaker, sessionId)
+      if (input.bind !== false) bindSpeaker(store, room, speaker, sessionId)
       const others = names.filter((name) => name !== speaker.name)
       if (room.remote) {
         const lan = lanOf(runtime)
@@ -396,7 +390,7 @@ export function createChatroomTool(runtime, { log = () => {} } = {}) {
   return {
     name: TOOL_NAME,
     description:
-      '在 DeepSeek Harness 的群聊房间里发言。**工具不新建成员**：只能用你在这间屋里已经创建好的某个 agent 身份发言，名字由 as 指定（只有一个本机 agent 时可省略），找不到就报错并列出可用的名字。send：以该身份发消息并 @ 指定成员，被 @ 的 agent 会在它自己的会话里开始干活，这条不等它回复；ask：@ 一个成员并等它回一句，把回复直接返回给你（私聊式对话，默认等 90 秒）；notify：发一条不 @ 任何人的通知，只给人看；read：读最近的对话，带 beforeSeq 可以往前翻页；list：看房间与成员（标明本机 / LAN 加入）；leave：把这个会话此前登记的成员身份移除；clear：清空这间屋的聊天记录（成员和规则保留）；session：mode=new 给某个 agent 开新会话（旧上下文不带入），mode=continue 回到上一个会话。发送默认会把用到的成员绑定到当前会话（之后 @ 它会回到这里继续），bind:false 可只发不绑。',
+      '在 DeepSeek Harness 的群聊房间里发言。**工具不新建成员**：只能用你在这间屋里已经创建好的某个 agent 身份发言，名字由 as 指定（只有一个本机 agent 时可省略），找不到就报错并列出可用的名字。send：以该身份发消息并 @ 指定成员，被 @ 的 agent 会在它自己的会话里开始干活，这条不等它回复；ask：@ 一个成员并等它回一句，把回复直接返回给你（私聊式对话，默认等 90 秒）；notify：发一条不 @ 任何人的通知，只给人看；read：读最近的对话，带 beforeSeq 可以往前翻页；list：看房间与成员（标明本机 / LAN 加入）；leave：把这个会话此前登记的成员身份移除；clear：清空这间屋的聊天记录（成员和规则保留）；session：mode=new 给某个 agent 开新会话（旧上下文不带入），mode=continue 回到上一个会话。发送默认只绑定当前房间成员到当前会话，不改 agent 默认会话或其他房间。session mode=status 查看绑定，mode=unbind 解除本房间绑定；bind:false 只发不绑。',
     parameters: TOOL_PARAMETERS,
     output: { schema: TOOL_OUTPUT_SCHEMA, render: (_args, value) => [{ type: 'text', text: value.message }] },
     execute,

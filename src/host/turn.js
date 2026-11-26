@@ -63,6 +63,32 @@ export function createBotRunner(ctx, { log = () => {} } = {}) {
     return {}
   }
 
+  /**
+   * 把新建的会话挂到它目录所属的工作区。
+   *
+   * 侧边栏的分组存在 workspace 记录的 sessionIds 上，不是会话头的字段：
+   * 网页端每打开一个会话都会挂一次，而 `agents.create` 不会自己走这一步，
+   * 于是会话的 cwd 明明是对的，侧边栏里却留在「未分组」。
+   */
+  async function attachToWorkspace(sessionId, directory) {
+    if (!directory) return
+    let registry
+    try {
+      registry = (ctx.root ?? ctx).get?.('workspaceRegistry')
+    } catch (error) {
+      log('workspace_registry_unavailable', error)
+      return
+    }
+    if (!registry || typeof registry.resolveByPath !== 'function') return
+    try {
+      const workspace = (await registry.resolveByPath(directory)) ?? (await registry.create(directory))
+      await workspace.attachSession(sessionId)
+    } catch (error) {
+      // 分组只是侧边栏归类，失败不该让这一轮发言失败。
+      log('workspace_attach_failed', { sessionId, directory, error })
+    }
+  }
+
   async function ensureAgent(bot) {
     const live = agents.get(bot.sessionId)
     if (live) return live
@@ -89,6 +115,7 @@ export function createBotRunner(ctx, { log = () => {} } = {}) {
       if (bot.external === true) fail('session_unavailable', '这个成员对应的会话当前不在本机，无法发言。')
       const handle = await registry.create({ sessionId: bot.sessionId, meta, agentOptions })
       agent = handle.agent ?? handle
+      await attachToWorkspace(bot.sessionId, meta.cwd)
     }
     agents.set(bot.sessionId, agent)
     return agent

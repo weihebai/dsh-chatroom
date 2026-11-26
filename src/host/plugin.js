@@ -12,6 +12,7 @@ import {
   markRead,
   postMessage,
   removeMember,
+  rotateSession,
   updateMember,
   updateRoom,
 } from './rooms.js'
@@ -249,6 +250,18 @@ export async function dispatch({ store, speaker, gate = null, lan = null, comman
       store.commit((draft) =>
         updateMember(draft, { roomId: input.roomId, memberId: input.memberId, patch: input.patch }),
       )
+      break
+    }
+    case 'session.switch': {
+      assertLocal(roomOf(input.roomId), '切换会话')
+      let changed = false
+      store.commit((draft) => {
+        const room = getRoom(draft, input.roomId)
+        const row = room?.members.find((member) => member.id === input.memberId)
+        const bot = draft.bots.find((item) => item.id === row?.botId)
+        changed = rotateSession(row, bot, String(input.mode ?? 'new'))
+      })
+      if (!changed) throw Object.assign(new Error('这个成员没有上一个会话可以回。'), { code: 'no_previous_session' })
       break
     }
     case 'member.remove': {

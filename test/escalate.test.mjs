@@ -116,3 +116,41 @@ test('自动讨论到顶：@ 房主拍板并停手，人说话后重新计数', 
   await settle(store)
   assert.equal(calls, 2, '人说话后应该重新开轮')
 })
+
+for (const targetKind of ['local', 'lan', 'human']) {
+  test('明确点名优先于主持人与全员规则：' + targetKind, async () => {
+    const state = emptyState()
+    const room = createRoom(state, { name: '点名' })
+    const store = fakeStore(state)
+    const chair = addBot(store, room, '主持人', 'chair')
+    const target = targetKind === 'local' ? addBot(store, room, '目标', 'target') :
+      addMember(state, { roomId: room.id, member: {
+        id: 'target', name: '目标', kind: targetKind === 'human' ? 'human' : 'bot',
+        owner: targetKind === 'lan' ? 'peer' : 'local', origin: { kind: targetKind === 'lan' ? 'lan' : 'local' },
+      } })
+    updateRoom(state, { roomId: room.id, rules: { chairId: chair.id, roundRobin: true } })
+    const called = []
+    const speaker = createSpeaker({ store,
+      runner: { async say(bot) { called.push(bot.name); return { text: '收到' } } },
+      dispatchRemote: async ({ member }) => { called.push(member.name); return { text: '收到' } },
+    })
+    const message = postMessage(state, { roomId: room.id, authorId: state.self.id, text: '@目标 在吗' })
+    speaker.afterHumanMessage({ roomId: room.id, messageId: message.id })
+    await settle(store)
+    assert.deepEqual(called, targetKind === 'human' ? [] : ['目标'])
+  })
+}
+
+test('单条消息上限真的执行：超长回复被截断，并提示下一条先给结论', async () => {
+  const state = emptyState()
+  const room = createRoom(state, { name: '长文' })
+  const store = fakeStore(state)
+  const bot = addBot(store, room, '后端', 'bot_long')
+  updateRoom(state, { roomId: room.id, rules: { maxChars: 120 } })
+  const long = '结论：可以。' + '细节'.repeat(200)
+  const speaker = createSpeaker({ store, runner: { async say() { return { text: long } } } })
+  await speaker.runRound({ roomId: room.id })
+  const posted = state.rooms[0].messages.find((message) => message.authorId === bot.id)
+  assert.ok(posted.text.length <= 120 + 20, '落库的消息不该超过上限')
+  assert.match(posted.text, /已截断/)
+})

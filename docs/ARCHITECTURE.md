@@ -300,10 +300,11 @@ DSH 自己的端口是 loopback + cookie + 每进程随机 token，**不能**拿
 别的机器（以及宿主自己）的 agent 一个都点不到，冒名报 `unknown_agent`。
 `notify` 带 `silent: true`：宿主只落库、不调 `onHumanMessage`，所以既不会触发 @ 也不会触发全员一轮。
 
-**发送即绑定**：`send` / `notify` 默认把用到的成员绑定到当前会话（`bot.sessionId` = 当前会话、
-`external = true`）。不绑的话，房间 @ 它时会 `resume` 它早先自己开的那个旧会话 —— 目录和上下文都不是
-你现在这个项目，讨论自然对不上（实测踩过：从 A 会话发消息，后面的讨论跑到了那个 agent 的旧会话里）。
-绑定后走「先等空闲再递话」，@ 回来直接落在你现在这个会话里。要只发不绑就传 `bind: false`。
+**房间级会话绑定**：`send` / `notify` 默认只更新当前房间成员的 `sessionId`、`sessionBound` 和 `external`，
+不改共享 Bot 的默认会话，也不更新其他房间。回复派发优先读取该成员绑定；LAN 加入方在本地镜像保留绑定，
+刷新投影/重连时按本机 botId 接回，宿主不负责保存对端的会话路由。`session new/continue` 也只切当前房间；
+`session status` 查看，`session unbind` 恢复默认会话；`bind: false` 只发不绑。
+旧版曾把绑定写进 Bot 全局字段：已有数据不猜、不迁移，以免错误覆盖默认会话。
 
 **半流式草稿**：宿主订阅 `agent/assistant-stream`（`start` → 逐块 `chunk`，文字在 `chunk.type==='text-delta'` → `end`），
 按 `frame.attemptId` 前缀认出是哪个会话；正在生成的内容写进 `room.activity.streaming`（**只在内存，不落库、
@@ -319,7 +320,7 @@ LAN 那台机器上的增量在它本机，宿主要额外转发才能看到（�
 把会话卡在那儿不合理；要看结果再 `read`。显式给 `timeoutSec`（1..180）才等它回一句，并把回复作为
 工具结果返回。实现是发完消息后按 250ms 轮询房间，直到目标成员在 `seq` 之后
 落了一条消息；目标没回、或那台机器没在跑，就按超时返回并说明（消息仍留在房间里）。
-不能 ask 一个绑在自己身上的身份（等于等自己）；ask 也不绑定 speaker。
+不能 ask 一个绑在自己身上的身份（等于等自己）；ask 同样默认只绑定当前房间发言人的会话，bind:false 可关闭。
 
 **两条路径的对应**：本机房间 = 直接 `postMessage` + `speaker.afterHumanMessage`（@ 谁就驱动谁）；
 镜像房间 = `lan.send({ authorBotId, silent })`，由宿主做同样两件事。工具的写路径只有这一处分叉。

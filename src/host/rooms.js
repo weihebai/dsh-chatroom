@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { newId, newRoomCode } from './state.js'
 import { claimColor, isWhaleColor } from './palette.js'
 
@@ -7,6 +8,46 @@ import { claimColor, isWhaleColor } from './palette.js'
  * 「纯」在这里很重要 —— 这层是唯一需要认真测的东西：房间、成员、消息序号、
  * 未读游标、三条发言规则。Bot 回合（要真调模型）不在这里，见 turn.js / speak.js。
  */
+
+/**
+ * 在房间成员这一层切换会话：只影响这间房，不碰 agent 默认会话，也不影响别的房间。
+ * @returns {boolean} 是否切换成功（continue 时没有上一个会话就返回 false）
+ */
+export function rotateSession(row, bot, mode) {
+  if (!row || !bot) return false
+  if (mode === 'new') {
+    row.previousSessionId = row.sessionBound ? row.sessionId : row.sessionId || bot.sessionId
+    row.previousExternal = row.sessionBound ? row.external === true : bot.external === true
+    row.previousSessionBound = row.sessionBound === true
+    row.sessionId = randomUUID()
+    row.sessionBound = true
+    row.external = false
+    return true
+  }
+  if (mode === 'continue') {
+    if (!row.previousSessionId) return false
+    const sessionId = row.sessionId
+    const external = row.external === true
+    const bound = row.sessionBound === true
+    row.sessionId = row.previousSessionId
+    row.external = row.previousExternal === true
+    row.sessionBound = row.previousSessionBound === true
+    row.previousSessionId = sessionId
+    row.previousExternal = external
+    row.previousSessionBound = bound
+    return true
+  }
+  if (mode === 'unbind') {
+    row.sessionId = bot.sessionId
+    delete row.sessionBound
+    delete row.external
+    delete row.previousSessionId
+    delete row.previousExternal
+    delete row.previousSessionBound
+    return true
+  }
+  return false
+}
 
 /** 发言规则默认值。三条规则是并列存在的开关，不是互斥的三选一。 */
 export const DEFAULT_RULES = {
@@ -180,6 +221,11 @@ export function addMember(state, { roomId, member } = {}) {
   // 外部成员：背后是一个已经活着的会话（用户正在聊的那个），不是插件自己开的 agent。
   // 只在真的是外部成员时才写这个字段，普通成员的形状保持不变。
   if (member.external === true) row.external = true
+  if (member.sessionBound === true) row.sessionBound = true
+  if (typeof member.previousSessionId === 'string' && member.previousSessionId) {
+    row.previousSessionId = member.previousSessionId.slice(0, 160)
+    row.previousExternal = member.previousExternal === true
+  }
   room.members.push(row)
   return row
 }

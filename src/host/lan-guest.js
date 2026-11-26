@@ -143,6 +143,7 @@ export function createLanGuest({ store, runner, gate = null, log = () => {} } = 
   function upsertMirror(draft, record, snapshot) {
     draft.links = (draft.links ?? []).filter((link) => link.id !== record.id).concat(record)
     const next = mirrorRoom(record, snapshot)
+    preserveBindings(next, record.localRoomId)
     if (!next) {
       paintGone(draft, record)
       return
@@ -204,10 +205,25 @@ export function createLanGuest({ store, runner, gate = null, log = () => {} } = 
     runtimes.delete(linkId)
   }
 
+  // 镜像会被宿主快照替换；本机的会话绑定不能被对端空 sessionId 覆盖。
+  function preserveBindings(next, localRoomId) {
+    if (!next) return
+    const previous = store.state.rooms.find((room) => room.id === localRoomId)
+    for (const member of next.members) {
+      if (member.origin?.kind !== 'local' || !member.botId) continue
+      const local = previous?.members.find((row) => row.botId === member.botId && row.sessionBound === true)
+      if (!local) continue
+      for (const key of ['sessionId', 'sessionBound', 'external', 'previousSessionId', 'previousExternal', 'previousSessionBound']) {
+        if (Object.hasOwn(local, key)) member[key] = local[key]
+      }
+    }
+  }
+
   function applyRemote(linkId, snapshot) {
     const record = linkById(linkId)
     if (!record) return null
     const next = mirrorRoom(record, snapshot)
+    preserveBindings(next, record.localRoomId)
     // 宿主那边把这间屋子解散了：投影里没有它了。
     // 不能就此把镜像悄悄删掉 —— 那会让加入方卡在一个「发不出去、也没有离开入口」的状态里。
     // 留一张墓碑：房间还在列表里，标成已解散，用户能自己把它清掉。
@@ -488,8 +504,11 @@ export function createLanGuest({ store, runner, gate = null, log = () => {} } = 
     }
     try {
       // 外部成员背后是本机正在用的那个会话：它可能还在跑自己的回合，先等空闲再递话。
-      const { text } = await runner.say({ ...bot, cwd: bot.cwd ?? undefined }, assignment.prompt, {
-        waitIdleFirst: bot.external === true,
+      const room = store.state.rooms.find((row) => row.id === record.localRoomId)
+      const bound = room?.members.find((member) => member.botId === assignment.agentId && member.origin?.kind === 'local' && member.sessionBound === true)
+      const sessionBot = bound ? { ...bot, sessionId: bound.sessionId, external: bound.external === true } : bot
+      const { text } = await runner.say({ ...sessionBot, cwd: bot.cwd ?? undefined }, assignment.prompt, {
+        waitIdleFirst: sessionBot.external === true,
       })
       await send({ text })
     } catch (error) {

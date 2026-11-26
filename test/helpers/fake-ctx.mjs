@@ -9,7 +9,7 @@
 
 const encoder = new TextEncoder()
 
-export function fakeCtx(dir, { reply, model = { provider: 'fake', model: 'fake-chat' } } = {}) {
+export function fakeCtx(dir, { reply, model = { provider: 'fake', model: 'fake-chat' }, workspaceRegistry } = {}) {
   const routes = new Map()
   const agents = new Map()
   const events = new Map()
@@ -72,6 +72,7 @@ export function fakeCtx(dir, { reply, model = { provider: 'fake', model: 'fake-c
     },
     agentDefaultModel: { currentSelection: () => model },
     workingDirectory: { defaultDirectory: dir },
+    ...(workspaceRegistry ? { workspaceRegistry } : {}),
     connection: {
       fetch: {
         register(route) {
@@ -87,6 +88,7 @@ export function fakeCtx(dir, { reply, model = { provider: 'fake', model: 'fake-c
     get: (key) => services[key],
     effect: (fn) => fn(),
   }
+  ctx.root = ctx
   return { ctx, routes, promises: prompts, prompts, events }
 }
 
