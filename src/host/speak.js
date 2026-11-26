@@ -67,10 +67,18 @@ function buildPrompt({ room, bot, at, viewerPeer = null }) {
       return `- ${member.name}（${kind}${role}${where}）`
     })
     .join('\n')
-  // 只给最近几条，并逐条截断：提示词是干活用的，不是聊天记录备份。
-  const recent = transcriptOf(room, { limit: 8, maxChars: 200 })
-    .split('\n')
-    .map((line, index) => line.replace(/^#\d+/, '#' + (index + 1)))
+  // 只给「你上次发言之后」的消息，最多 6 条：交接要的是当前这件事的上下文，
+  // 不是整个房间的聊天记录。没有比自己更早的发言时退回最近 6 条。
+  const visible = room.messages.filter((message) => message.status !== 'error' && message.status !== 'notice')
+  const mineAt = visible.map((message) => message.authorId).lastIndexOf(bot.id)
+  const tail = visible.slice(Math.max(0, mineAt + 1)).slice(-6)
+  const recent = tail
+    .map((message, index) => {
+      const human = message.authorKind === 'human'
+      const body = message.text.length > 200 ? message.text.slice(0, 200) + '…' : message.text
+      const origin = message.origin?.kind === 'lan' ? '〔远程〕' : ''
+      return '#' + (index + 1) + ' ' + origin + message.authorName + '（' + (human ? '人' : 'agent') + '）：' + body
+    })
     .join('\n')
   const mine = room.messages.filter((message) => message.authorId === bot.id && message.status !== 'error').at(-1)
   const waiting = room.messages

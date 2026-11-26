@@ -190,3 +190,17 @@ test('提示词：远程派发按收件人视角标「本机」，并要求先�
   assert.match(prompt, /本机agent（agent，宿主那台机器/)
   assert.match(prompt, /先动手|要处理的原文/)
 })
+
+test('提示词只带自己上次发言之后的记录，不带整间房的历史', () => {
+  const state = emptyState()
+  const room = createRoom(state, { name: '裁剪' })
+  const store = fakeStore(state)
+  const bot = addBot(store, room, '后端', 'b_clip')
+  postMessage(state, { roomId: room.id, authorId: state.self.id, text: '很早以前的一句话' })
+  postMessage(state, { roomId: room.id, authorId: bot.id, text: '我上次的答复' })
+  postMessage(state, { roomId: room.id, authorId: state.self.id, text: '交给你的新任务' })
+  const speaker = createSpeaker({ store, runner: { async say() { return { text: '' } } } })
+  const prompt = speaker.buildPrompt({ room: state.rooms[0], bot: { id: bot.id, name: '后端' }, at: 'mention' })
+  assert.match(prompt, /交给你的新任务/)
+  assert.doesNotMatch(prompt, /很早以前的一句话/)
+})
