@@ -305,6 +305,44 @@ async function waitForSelector(cdp, sessionId, selector, attempts = 80) {
   throw new Error(`等不到元素：${selector}｜页面当时：${JSON.stringify(state)}`)
 }
 
+// 名字 / 虎鲸 / 我的 agent 都收进了「设置」弹窗：断言这些控件之前先开窗，跑完关掉，
+// 否则后面的截图会带着一层遮罩。
+async function openSettings(cdp, sessionId) {
+  const opened = await evaluate(
+    cdp,
+    sessionId,
+    `(() => {
+      const button = [...document.querySelectorAll('.cr-col-foot .cr-link-btn')].find(
+        (node) => node.textContent.trim() === '设置',
+      )
+      if (!button) return false
+      button.click()
+      return true
+    })()`,
+  )
+  if (!opened) throw new Error('左栏底部点不开「设置」')
+  await waitForSelector(cdp, sessionId, '.cr-settings')
+}
+
+async function closeSettings(cdp, sessionId) {
+  const closed = await evaluate(
+    cdp,
+    sessionId,
+    `(() => {
+      const button = document.querySelector('.cr-settings-head .cr-icon-btn')
+      if (!button) return false
+      button.click()
+      return true
+    })()`,
+  )
+  if (!closed) throw new Error('设置弹窗上没有关闭按钮')
+  for (let i = 0; i < 40; i += 1) {
+    if (await evaluate(cdp, sessionId, `!document.querySelector('.cr-settings')`)) return
+    await sleep(80)
+  }
+  throw new Error('设置弹窗没有关掉，后面的截图会带着遮罩')
+}
+
 /** 元素在视口里的位置，连视口大小一起取回来，好判断它是不是跑出去了。 */
 async function boundsOf(cdp, sessionId, selector) {
   return evaluate(
@@ -974,6 +1012,7 @@ try {
     // 这里走真实点击 —— 第一次点只问一句，答完才真删；取消之后必须回到原样，
     // 而且「别人屋里的成员身份」「整间屋子的记录」都不该被一次误点带走。
     if (wants(shot, 'confirm-delete')) {
+      await openSettings(cdp, sessionId)
       // React 一帧之后才重渲染，点击后给一帧的时间再读状态。
       const chipState = () =>
         evaluate(
@@ -1033,7 +1072,8 @@ try {
         throw new Error(`取消之后没回到原样：${JSON.stringify(back)}`)
       }
 
-      // 3) 解散房间：点一次只出「确定解散」，屋子还在列表里
+      // 3) 解散房间：点一次只出「确定解散」，屋子还在列表里（规则在主面板，先关掉设置）
+      await closeSettings(cdp, sessionId)
       const openedRules = await evaluate(
         cdp,
         sessionId,
@@ -1235,6 +1275,7 @@ try {
     // （成员列换成新名字），再改回去，别把后面的截图带脏。
     // 断言只认成员列，不认输入框：输入框里还有你正在打的草稿，看它等于什么都没证明。
     if (wants(shot, 'name-edit')) {
+      await openSettings(cdp, sessionId)
       const memberNames = () =>
         evaluate(
           cdp,
@@ -1246,7 +1287,7 @@ try {
           cdp,
           sessionId,
           `(() => {
-            const el = document.querySelector('.cr-name-row input')
+            const el = document.querySelector('.cr-settings .cr-name-row input')
             return el ? el.value : null
           })()`,
         )
@@ -1255,7 +1296,7 @@ try {
           cdp,
           sessionId,
           `(() => {
-            const el = document.querySelector('.cr-name-row input')
+            const el = document.querySelector('.cr-settings .cr-name-row input')
             if (!el) return false
             const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
             el.focus()
@@ -1279,7 +1320,7 @@ try {
           cdp,
           sessionId,
           `(() => {
-            const el = document.querySelector('.cr-name-row input')
+            const el = document.querySelector('.cr-settings .cr-name-row input')
             if (!el) return false
             const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
             el.focus()
@@ -1313,6 +1354,7 @@ try {
         throw new Error(`名字没改回去，后面的截图会带着脏状态：${JSON.stringify(await memberNames())}`)
       }
       if ((await readName()) !== '林岸') throw new Error('改完之后输入框没有回到当前名字')
+      await closeSettings(cdp, sessionId)
       console.log('verified — 名字可改：删干净不会自己长回来，成员列当场换名字，再改回来')
     }
 
@@ -1481,6 +1523,8 @@ try {
     // 这一屏要证明补报那条路是通的：那台机器建完 agent，我这边成员列立刻多一个人、
     // 认得出是哪台机器的、而且 @ 它真的把这一轮派回去跑；左栏「我的 agent」能建能删。
     if (wants(shot, 'bring-agent')) {
+      // 「我的 agent」现在住在设置弹窗里，后面既读它们的 chip 也要点新建入口。
+      await openSettings(cdp, sessionId)
       const read = () =>
         evaluate(
           cdp,
@@ -1527,7 +1571,7 @@ try {
         cdp,
         sessionId,
         `(() => {
-          const button = [...document.querySelectorAll('.cr-col-foot .cr-link-btn')].find((node) =>
+          const button = [...document.querySelectorAll('.cr-settings .cr-link-btn')].find((node) =>
             node.textContent.includes('新建一个 agent'),
           )
           if (!button) return false
@@ -1636,6 +1680,7 @@ try {
       if (removed.chips.includes('临时 agent') || find(removed, '临时 agent')) {
         throw new Error('删掉的 agent 还留在「我的 agent」或成员列里')
       }
+      await closeSettings(cdp, sessionId)
       // 这一屏专开的演示例房间收掉：后面的截图不该带着上一屏的故事。
       await fetch(`http://127.0.0.1:${port}/preview/tidy`)
       console.log('verified — 空手加入的机器补建 agent：成员列当场多一个 LAN·陈默的 ThinkPad，@ 它能跑一轮；左栏能建、删之前先问一句')
@@ -1788,18 +1833,16 @@ try {
         throw new Error(`从拖过去的胶囊展开后没留在原地：${JSON.stringify(openedAt)}`)
       }
 
-      // 6. 浮窗不是一块光秃秃的记录：头像 / 署名 / 时间 / 身份行 / @ 候选都得住在这里；
+      // 6. 浮窗不是一块光秃秃的记录：头像 / 署名 / 时间 / @ 候选都得住在这里；
       //    收起以后那颗胶囊也得带着最后一句 —— 这几样正是这一版重做的内容，掉一个就是退回去。
       const content = await evaluate(cdp, sessionId, `(() => {
         const rows = [...document.querySelectorAll('.cr-float-msg')]
         const last = rows[rows.length - 1]
-        const identity = document.querySelector('.cr-composer-compact .cr-composer-identity')
         return {
           rows: rows.length,
           avatars: document.querySelectorAll('.cr-float-msg .cr-avatar').length,
           names: document.querySelectorAll('.cr-float-msg .cr-msg-name').length,
           times: document.querySelectorAll('.cr-float-msg .cr-msg-time').length,
-          identity: identity ? identity.textContent.trim() : '',
           mentionButton: Boolean(document.querySelector('.cr-composer-compact .cr-mention-btn')),
           lastName: last && last.querySelector('.cr-msg-name') ? last.querySelector('.cr-msg-name').textContent : '',
         }
@@ -1808,7 +1851,6 @@ try {
       if (content.avatars !== content.rows) throw new Error(`每条消息都该有头像：${content.avatars}/${content.rows}`)
       if (content.names !== content.rows) throw new Error(`每条消息都该有署名：${content.names}/${content.rows}`)
       if (content.times !== content.rows) throw new Error(`每条消息都该有时间：${content.times}/${content.rows}`)
-      if (!/以/.test(content.identity)) throw new Error(`浮窗里该写明以谁的身份发言：${JSON.stringify(content.identity)}`)
       if (!content.mentionButton) throw new Error('浮窗输入框里没有 @ 按钮')
       await evaluate(cdp, sessionId, `document.querySelector('.cr-composer-compact .cr-mention-btn').click()`)
       await waitForSelector(cdp, sessionId, '.cr-mention-pop')
