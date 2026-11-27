@@ -513,6 +513,10 @@ export function createLanGuest({ store, runner, gate = null, log = () => {} } = 
         return
       }
     }
+    // 跑模型期间定时告诉宿主「我还在跑」：默认 45 秒那个窗口量的是传输心跳，
+    // 不是一轮 agent 的执行预算。不续的话，一台正在写代码、调工具的机器会被判掉线，
+    // 它跑完的成果还会撞上 assignment_expired 白丢。
+    let beat = null
     try {
       // 外部成员背后是本机正在用的那个会话：它可能还在跑自己的回合，先等空闲再递话。
       const room = store.state.rooms.find((row) => row.id === record.localRoomId)
@@ -521,6 +525,18 @@ export function createLanGuest({ store, runner, gate = null, log = () => {} } = 
       // 提示词在本机拼：成员「本机/宿主」按这台机器算，不依赖宿主视角；
       // 旧宿主没有 facts 时退回它给的整段 prompt。
       const prompt = assignment.facts ? promptFromFacts(assignment.facts, { selfKey: record.peerId }) : assignment.prompt
+      beat = setInterval(() => {
+        postJson(
+          `${baseUrl(record.host, record.port)}/lan/hold`,
+          { peerId: record.peerId, assignmentId: assignment.id, ms: 30_000 },
+          { timeoutMs: 8000 },
+        ).catch((error) => {
+          // 老宿主没这条路由（404）、或宿主已判超时（assignment_expired）都不是故障：
+          // 前者退回原窗口，后者就靠迟到的回传把成果收回去。
+          if (error?.code !== 'not_found' && error?.code !== 'assignment_expired') log('lan_hold_failed', error)
+        })
+      }, 15_000)
+      beat.unref?.()
       const { text } = await runner.say({ ...sessionBot, cwd: bot.cwd ?? undefined }, prompt, {
         waitIdleFirst: sessionBot.external === true,
       })
@@ -528,6 +544,8 @@ export function createLanGuest({ store, runner, gate = null, log = () => {} } = 
     } catch (error) {
       log('lan_assignment_failed', { botId: bot.id, error })
       await send({ error: String(error?.code ?? error?.message ?? error).slice(0, 160) }).catch(() => {})
+    } finally {
+      if (beat) clearInterval(beat)
     }
   }
 

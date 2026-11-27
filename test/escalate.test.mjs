@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { emptyState } from '../src/host/state.js'
-import { addMember, createRoom, DEFAULT_RULES, postMessage, updateRoom } from '../src/host/rooms.js'
+import { addMember, createRoom, DEFAULT_RULES, postMessage, transcriptOf, updateRoom } from '../src/host/rooms.js'
 import { createSpeaker } from '../src/host/speak.js'
 
 function fakeStore(state) {
@@ -101,6 +101,10 @@ test('自动讨论到顶：@ 房主拍板并停手，人说话后重新计数', 
   assert.match(escalateMsg.text, /自动讨论已达 1 轮上限/)
   assert.match(escalateMsg.text, /你定/)
   assert.match(escalateMsg.text, /@我/, '应该 @ 房主')
+  // 这是系统提醒，不是谁说过的话：存成 notice，且不能进给模型看的对话记录 ——
+  // 否则下一轮模型会把「轮次到顶」当成那个 agent 刚说过的一句，接着往下演。
+  assert.equal(escalateMsg.status, 'notice', '到顶提醒该按 notice 存')
+  assert.equal(transcriptOf(room, { limit: 50 }).includes('自动讨论已达'), false, '系统提醒不该进模型对话记录')
 
   // 再来的 agent 消息不会重复提醒
   const third = postMessage(state, { roomId: room.id, authorId: a.id, text: '嗯。' })

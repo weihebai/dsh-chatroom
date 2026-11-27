@@ -131,6 +131,12 @@ export function createLanHost({ store, onHumanMessage = () => {}, log = logDefau
   const peers = new Map()
   /** assignmentId → {id, peerId, roomId, memberId, agentId, memberName, prompt, ...} */
   const assignments = new Map()
+  /**
+   * 已经按超时判死的派发：短期留着。对面可能只是慢，跑完才回传 ——
+   * 留着才能把成果接回屋里，而不是让一次真实的模型调用白跑。
+   */
+  const recentlyDone = new Map()
+  const LATE_GRACE = 15 * 60_000
   /** 长轮询的唤醒器：有人加入、有新 assignment、状态变了，都推一下。 */
   const wakers = new Set()
   let server = null
@@ -566,14 +572,31 @@ export function createLanHost({ store, onHumanMessage = () => {}, log = logDefau
       if (row.done) return
       row.done = true
       assignments.delete(row.id)
+      // 留一扇迟到回传的窗：对面若只是慢、跑完才回，成果还能落回屋里。
+      recentlyDone.set(row.id, {
+        peerId: row.peerId,
+        roomId: row.roomId,
+        memberId: row.memberId,
+        memberName: row.memberName,
+        at: Date.now(),
+      })
+      for (const [key, expired] of recentlyDone) {
+        if (Date.now() - expired.at > LATE_GRACE) recentlyDone.delete(key)
+      }
       wake()
       row.reject(Object.assign(new Error('对面机器没有回应。'), { code: 'lan_timeout' }))
     }, left)
     row.timer.unref?.()
   }
 
-  /** 一条派发的总期限上限：再多的延长也不能把「一轮」拖成没有尽头。 */
-  const MAX_ASSIGN_WAIT = 300_000
+  /**
+   * 一条派发的总期限上限。
+   *
+   * 编程这类任务一轮可能跑好几分钟：对面在跑的时候每 15s 打一次 /lan/hold 续期，
+   * 所以这里的上限是「多久没有任何进展才判死」，而不是「一轮总共只能跑多久」。
+   * 仍留一个天花板，避免卡死的回合被无限期挂着。
+   */
+  const MAX_ASSIGN_WAIT = 1_800_000
   const MAX_HOLD = 180_000
 
   /**
@@ -662,8 +685,11 @@ export function createLanHost({ store, onHumanMessage = () => {}, log = logDefau
   }
 
   function settleAssignment({ peerId, assignmentId, text, error, denied }) {
-    const row = assignments.get(String(assignmentId ?? ''))
-    if (!row || row.done) fail('assignment_expired', '这一轮已经结束了。')
+    const key = String(assignmentId ?? '')
+    const row = assignments.get(key)
+    // 不在队列里：可能是宿主已按超时判死。走迟到回传那条路，别直接把成果丢掉。
+    if (!row) return deliverLate(key, { peerId, text, error, denied })
+    if (row.done) fail('assignment_expired', '这一轮已经结束了。')
     if (row.peerId !== peerId) fail('assignment_denied', '这条派发不属于这台机器。')
     row.done = true
     clearTimeout(row.timer)
@@ -679,6 +705,43 @@ export function createLanHost({ store, onHumanMessage = () => {}, log = logDefau
       row.resolve({ text: String(text ?? '') })
     }
     return { ok: true }
+  }
+
+  /**
+   * 迟到回传：宿主已判超时，但对面跑完才回。把正文接回屋里，顶掉那条「没回上来」
+   * 占位（一条派发只该有一份结果），而不是丢掉。只在 LATE_GRACE 窗口内认。
+   */
+  function deliverLate(key, { peerId, text, error, denied }) {
+    const expired = recentlyDone.get(key)
+    if (!expired) fail('assignment_expired', '这一轮已经结束了。')
+    if (expired.peerId !== peerId) fail('assignment_denied', '这条派发不属于这台机器。')
+    if (Date.now() - expired.at > LATE_GRACE) fail('assignment_expired', '这一轮已经结束了。')
+    recentlyDone.delete(key)
+    if (denied || error !== undefined) return { ok: true, late: 'failed' }
+    const body = String(text ?? '')
+    if (!body) return { ok: true, late: 'empty' }
+    store.commit((state) => {
+      const room = getRoom(state, expired.roomId)
+      if (!room) return
+      const member = room.members.find((row) => row.id === expired.memberId)
+      if (!member) return
+      const max = room.rules.maxChars || 1200
+      const clean = body.length > max ? body.slice(0, max) + ' …（超出 ' + max + ' 字上限，已截断）' : body
+      for (let index = room.messages.length - 1; index >= 0; index -= 1) {
+        const message = room.messages[index]
+        if (message.authorId !== member.id) continue
+        if (message.status === 'error') {
+          message.text = clean
+          message.status = 'sent'
+          message.at = new Date().toISOString()
+          return
+        }
+        break
+      }
+      postMessage(state, { roomId: expired.roomId, authorId: member.id, text: clean })
+    })
+    log('assignment_late_delivered', { roomId: expired.roomId, memberId: expired.memberId })
+    return { ok: true, late: 'delivered' }
   }
 
   function viewFor(peer) {

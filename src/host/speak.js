@@ -242,7 +242,7 @@ export function createSpeaker({ store, runner, dispatchRemote = null, gate = nul
     })
   }
 
-  async function speakOne({ roomId, botId, at, depth, budget, spoke, token, trigger = null }) {
+  async function speakOne({ roomId, botId, at, depth, budget, spoke, token, trigger = null, stall = null }) {
     if (budget.left <= 0) return
     // 一轮之内同一个人只说一次：主持人的 @ 和全员队列点到同一个人时，
     // 后到的那次直接跳过，把预算留给还没开口的人。
@@ -324,13 +324,21 @@ export function createSpeaker({ store, runner, dispatchRemote = null, gate = nul
       complete(roomId, directoryBot, botId, text)
       const fresh = roomOrFail(roomId)
       const created = fresh.messages.at(-1)
+      // 这条回复里 @ 了谁：决定要不要继续接力。
+      const targets = mentionedBots(fresh, created)
       if (depth < fresh.rules.maxDepth && budget.left > 0) {
-        for (const target of mentionedBots(fresh, created)) {
-          if (budget.left <= 0) break
+        for (const target of targets) {
+          if (budget.left <= 0) {
+            if (stall) stall.budget = true
+            break
+          }
           // 这一轮已经被「停下」了：接力也别再往下传。
           if (epochs.get(roomId) !== token) break
-          await speakOne({ roomId, botId: target.id, at: 'mention', depth: depth + 1, budget, spoke, token, trigger })
+          await speakOne({ roomId, botId: target.id, at: 'mention', depth: depth + 1, budget, spoke, token, trigger, stall })
         }
+      } else if (targets.length && stall) {
+        // 到了接力层数上限：还有 @ 没传下去，界面要能说清是「层数到顶」而不是没人理。
+        stall.depth = true
       }
     } catch (error) {
       // 对面的机器自己没过授权那道门：那是它的选择，不是「它坏了」。
@@ -348,18 +356,7 @@ export function createSpeaker({ store, runner, dispatchRemote = null, gate = nul
         log('turn_abandoned', { roomId, botId, error })
         return
       }
-      store.commit((state) => {
-        const room = getRoom(state, roomId)
-        const directory = state.bots.find((row) => row.id === bot.botId)
-        if (directory) directory.lastError = String(error?.code ?? error?.message ?? error).slice(0, 200)
-        if (!room) return
-        postMessage(state, {
-          roomId,
-          authorId: botId,
-          text: `（${bot.name} 这次没回上来：${String(error?.code ?? error?.message ?? error).slice(0, 120)}）`,
-          status: 'error',
-        })
-      })
+      postTurnFailure(roomId, bot, String(error?.code ?? error?.message ?? error))
     } finally {
       if (driveSession) endStream(driveSession)
       // 只清自己那一个：用户停下之后紧接着开的新一轮有它自己的 controller，
@@ -369,6 +366,58 @@ export function createSpeaker({ store, runner, dispatchRemote = null, gate = nul
       const rest = speaking.filter((name) => name !== bot.name)
       if (rest.length) setActivity(roomId, { speaking: rest })
     }
+  }
+
+  /**
+   * 这一轮失败：落一条「没回上来」占位。
+   *
+   * 同一个人连续失败（重试又失败、或一轮里被反复派发）只保留一条：一条派发只该有
+   * 一份结果。上一条若还是这个人的失败占位，就地改写，不再追加 —— 否则重试几次
+   * 就多几条一模一样的东西，看着像出了好几次事。
+   */
+  function postTurnFailure(roomId, bot, detail) {
+    const text = `（${bot.name} 这次没回上来：${String(detail).slice(0, 120)}）`
+    store.commit((state) => {
+      const room = getRoom(state, roomId)
+      const directory = state.bots.find((row) => row.id === bot.botId)
+      if (directory) directory.lastError = String(detail).slice(0, 200)
+      if (!room) return
+      for (let index = room.messages.length - 1; index >= 0; index -= 1) {
+        const message = room.messages[index]
+        if (message.authorId !== bot.id) continue
+        if (message.status === 'error') {
+          message.text = text
+          message.at = new Date().toISOString()
+          return
+        }
+        break
+      }
+      postMessage(state, { roomId, authorId: bot.id, text, status: 'error' })
+    })
+  }
+
+  /**
+   * 这一轮被上限截断（回复预算 / 接力层数）：说清是哪一个到顶了。
+   * 用 notice —— 它解释「为什么没人再说话」，不是谁的发言，也不进模型上下文。
+   */
+  function postStallNotice(roomId, stall, cap, token) {
+    if (!stall.budget && !stall.depth) return
+    if (epochs.get(roomId) !== token) return
+    const room = store.inspect((state) => getRoom(state, roomId))
+    if (!room) return
+    const parts = []
+    if (stall.budget) parts.push(`本轮已达回复上限（一条消息最多 ${cap} 个 agent）`)
+    if (stall.depth) parts.push('接力层数到顶')
+    const text = `（${parts.join('，')}：后面还有 agent 没轮到，可以再发一句，或在「规则」里调高上限）`
+    store.commit((state) => {
+      const row = getRoom(state, roomId)
+      if (!row) return
+      const author =
+        row.members.find((member) => member.id === row.ownerId) ??
+        row.members.find((member) => member.kind === 'human')
+      if (!author) return
+      postMessage(state, { roomId, authorId: author.id, text, status: 'notice' })
+    })
   }
 
   function complete(roomId, directoryBot, memberId, text) {
@@ -494,7 +543,9 @@ export function createSpeaker({ store, runner, dispatchRemote = null, gate = nul
       const row = getRoom(draft, roomId)
       if (!row) return
       const author = row.members.find((member) => member.id === message.authorId) ? message.authorId : row.ownerId
-      postMessage(draft, { roomId, authorId: author, text })
+      // 这是系统的提醒，不是谁说过的话：用 notice，不进给模型看的对话记录 ——
+      // 否则下一轮模型会把「轮次到顶」当成那个 agent 刚说过的一句，接着往下演。
+      postMessage(draft, { roomId, authorId: author, text, status: 'notice' })
     })
     log('auto_round_escalated', { roomId, limit })
   }
@@ -548,7 +599,10 @@ export function createSpeaker({ store, runner, dispatchRemote = null, gate = nul
 
   function run(roomId, queue, { kind, trigger = null }, awaitIt = false) {
     if (running.has(roomId)) fail('room_busy', '这间屋子正在发言，等这一轮结束。')
-    const budget = { left: Math.max(1, roomOrFail(roomId).rules.maxSpeakers) }
+    const cap = Math.max(1, roomOrFail(roomId).rules.maxSpeakers)
+    const budget = { left: cap }
+    // 这一轮被上限截断了吗：给界面一句能看懂的解释，而不是「突然没人说话了」。
+    const stall = { budget: false, depth: false }
     const token = Symbol('round')
     const spoke = new Set()
     running.add(roomId)
@@ -557,7 +611,10 @@ export function createSpeaker({ store, runner, dispatchRemote = null, gate = nul
     const task = (async () => {
       try {
         for (const [index, member] of queue.entries()) {
-          if (budget.left <= 0) break
+          if (budget.left <= 0) {
+            if (index < queue.length) stall.budget = true
+            break
+          }
           // 「停下这一轮」是停整轮，不是只停当前这个：epoch 不在了就别再叫下一个人。
           if (epochs.get(roomId) !== token) break
           await speakOne({
@@ -569,8 +626,10 @@ export function createSpeaker({ store, runner, dispatchRemote = null, gate = nul
             spoke,
             token,
             trigger,
+            stall,
           })
         }
+        postStallNotice(roomId, stall, cap, token)
       } finally {
         settle(roomId, { drain: true, token })
       }

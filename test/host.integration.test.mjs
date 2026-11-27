@@ -632,6 +632,55 @@ test('房间说到一半被解散：那一轮安静收掉，不把 agent 记成�
   }
 })
 
+test('连续失败只留一条占位：重试又失败不会堆出一串「没回上来」', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'chatroom-'))
+  const { ctx, routes, prompts } = fakeCtx(dir, {
+    reply: () => {
+      throw Object.assign(new Error('模型这一轮挂了'), { code: 'model_failed' })
+    },
+  })
+  const dispose = await apply(ctx)
+  const roomNow = async () => (await call(routes, 'snapshot', {})).value.rooms[0]
+  const waitPrompts = async (target) => {
+    for (let i = 0; i < 80; i += 1) {
+      if (prompts.length >= target) return
+      await tick(50)
+    }
+    throw new Error(`等第 ${target} 次驱动超时`)
+  }
+  const waitError = async () => {
+    for (let i = 0; i < 80; i += 1) {
+      const room = await roomNow()
+      const errors = room.messages.filter((m) => m.status === 'error')
+      if (errors.length) return errors
+      await tick(50)
+    }
+    throw new Error('等失败占位超时')
+  }
+  try {
+    const created = await call(routes, 'command', { action: 'room.create', input: { name: '连续失败' } })
+    const roomId = created.value.rooms[0].id
+    await call(routes, 'command', { action: 'member.createBot', input: { roomId, name: 'A' } })
+    await call(routes, 'command', { action: 'msg.send', input: { roomId, text: '@A 报一下。' } })
+    const [first] = await waitError()
+    assert.match(first.text, /没回上来/)
+
+    // 再重试两次，两次都失败：占位不该越堆越多。
+    for (let round = 0; round < 2; round += 1) {
+      const target = prompts.length + 1
+      await call(routes, 'command', { action: 'msg.retry', input: { roomId, seq: first.seq } })
+      await waitPrompts(target)
+      await tick(120)
+    }
+    const room = await roomNow()
+    const errors = room.messages.filter((m) => m.status === 'error')
+    assert.equal(errors.length, 1, `同一个人连续失败应只留一条占位，实际 ${errors.length} 条`)
+    assert.equal(prompts.length, 3, '首轮 + 两次重试都真的跑过')
+  } finally {
+    await dispose()
+  }
+})
+
 test('「停下这一轮」是真的停住：后面的人不再发言，也不留一条红色「没回上来」', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'chatroom-'))
   let release = () => {}
